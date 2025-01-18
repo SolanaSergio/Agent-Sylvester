@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from pathlib import Path
 import json
 import re
@@ -95,8 +95,8 @@ class RequirementAnalyzer:
             "pendingSteps": pending_steps
         }
 
-    async def analyze_user_request(self, description: str) -> Dict[str, bool]:
-        """Analyze user request to determine required updates"""
+    async def analyze_user_request(self, description: str) -> Dict[str, Any]:
+        """Analyze user request to determine required updates and code generation needs"""
         logger.info(f"Analyzing user request: {description}")
         
         # Initialize requirements dictionary
@@ -106,6 +106,11 @@ class RequirementAnalyzer:
             "features": [],
             "styles": [],
             "api_endpoints": [],
+            "code_changes": {
+                "files_to_modify": [],
+                "files_to_create": [],
+                "code_blocks": []
+            },
             "database": {
                 "needed": False,
                 "type": None,
@@ -116,6 +121,36 @@ class RequirementAnalyzer:
         # Convert to lowercase for easier matching
         description = description.lower()
         
+        # Analyze for code generation requirements
+        code_patterns = [
+            (r"(?:create|add|implement)\s+(?:a|an|the)?\s*(\w+)\s+(?:function|method|class|interface)", "code_blocks"),
+            (r"(?:update|modify|change)\s+(?:the)?\s*(\w+)\s+(?:in|at|of)\s+([^\s]+)", "files_to_modify"),
+            (r"(?:create|add)\s+(?:a|an|the)?\s*(?:new)?\s*(\w+)\s+(?:file|module)\s+(?:in|at)?\s*([^\s]+)?", "files_to_create")
+        ]
+        
+        for pattern, key in code_patterns:
+            matches = re.finditer(pattern, description)
+            for match in matches:
+                if match.groups():
+                    if key == "code_blocks":
+                        requirements["code_changes"]["code_blocks"].append({
+                            "type": match.group(1),
+                            "name": match.group(1),
+                            "description": description
+                        })
+                    elif key == "files_to_modify":
+                        requirements["code_changes"]["files_to_modify"].append({
+                            "name": match.group(2),
+                            "element": match.group(1),
+                            "description": description
+                        })
+                    elif key == "files_to_create":
+                        requirements["code_changes"]["files_to_create"].append({
+                            "name": match.group(1),
+                            "path": match.group(2) if match.group(2) else None,
+                            "description": description
+                        })
+
         # Analyze for UI components
         ui_patterns = [
             (r"(?:add|create|build|implement)\s+(?:a|an|the)?\s*(\w+)\s+(?:component|page|screen|view)", "components"),
@@ -127,8 +162,12 @@ class RequirementAnalyzer:
             matches = re.finditer(pattern, description)
             for match in matches:
                 if match.groups():
-                    requirements["components"].append(match.group(1))
-                
+                    requirements["components"].append({
+                        "name": match.group(1),
+                        "type": "component",
+                        "description": description
+                    })
+        
         # Analyze for features
         feature_patterns = {
             "authentication": ["login", "auth", "sign up", "register", "user account"],

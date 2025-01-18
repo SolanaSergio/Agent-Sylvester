@@ -6,6 +6,7 @@ from src.utils.types import ProjectConfig, ProjectStatus, ComponentStatus, Depen
 import logging
 from src.agents.progress_tracker import ProgressTracker
 import datetime
+from src.builders.project_builder import ProjectBuilder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,200 +54,103 @@ class MetaAgent:
         self.project_builder = ProjectBuilder()
         self.web_scraper = WebScraper()
 
-    async def initialize_project(self, config: ProjectConfig) -> None:
-        """Initialize a new project with the given configuration"""
-        created_directory = False
+    async def _check_permissions(self) -> None:
+        """Check if we have necessary permissions to create and modify the project"""
         try:
-            # Convert to absolute path and resolve any symlinks
-            if config.project_location.lower() == "agent":
-                # Create in Auto Agent directory
-                project_location = self.agent_root
-            else:
-                project_location = Path(config.project_location).resolve()
-            
-            self.project_path = project_location / config.name
-            self.current_project = config
-            
-            logger.info(f"Agent root: {self.agent_root}")
-            logger.info(f"Project location: {project_location}")
-            logger.info(f"Target project path: {self.project_path}")
-            
-            # Initialize progress tracker first
-            self.progress_tracker = ProgressTracker(self.project_path)
-            await self.progress_tracker.update_status("Starting project initialization")
-            
-            # Check parent directory permissions first
-            await self.progress_tracker.update_status("Checking permissions...")
-            if not project_location.exists():
-                raise ValueError(f"Location does not exist: {project_location}")
-            
+            if not self.project_path:
+                raise ValueError("Project path not set")
+
+            # Check if parent directory exists
+            parent_dir = self.project_path.parent
+            if not parent_dir.exists():
+                raise ValueError(f"Parent directory does not exist: {parent_dir}")
+
             # Try to create a temporary file to test write permissions
-            test_file = project_location / f".test_{config.name}"
+            test_file = parent_dir / f".test_{self.project_path.name}"
             try:
                 test_file.touch()
                 test_file.unlink()  # Remove the test file
                 logger.info("Write permission test passed")
             except (PermissionError, OSError) as e:
                 logger.error(f"Permission test failed: {str(e)}")
-                raise ValueError(f"No write permission in directory: {project_location}\nError: {str(e)}")
-            
-            # Create or verify project directory
-            await self.progress_tracker.update_status("Creating project directory...")
+                raise ValueError(f"No write permission in directory: {parent_dir}\nError: {str(e)}")
+
+        except Exception as e:
+            logger.error(f"Permission check failed: {str(e)}")
+            raise ValueError(f"Permission check failed: {str(e)}")
+
+    async def _create_project_directory(self) -> None:
+        """Create or verify project directory"""
+        try:
+            # First, try to create the directory
             try:
-                # First, try to create the directory
-                try:
-                    self.project_path.mkdir(parents=True)
-                    created_directory = True
-                    logger.info("Project directory created successfully")
-                except FileExistsError:
-                    # If directory exists, check if it's empty or only contains our test files
-                    contents = list(self.project_path.iterdir())
-                    # Filter out hidden files and our test files
-                    real_contents = [f for f in contents if not f.name.startswith('.')]
-                    
-                    if real_contents:
-                        logger.info(f"Directory exists with contents: {[f.name for f in real_contents]}")
-                        raise ValueError(f"DIRECTORY_EXISTS:{self.project_path}")
-                    else:
-                        logger.info("Directory exists but is empty or contains only temporary files, proceeding")
+                self.project_path.mkdir(parents=True)
+                logger.info("Project directory created successfully")
+            except FileExistsError:
+                # If directory exists, check if it's empty or only contains our test files
+                contents = list(self.project_path.iterdir())
+                # Filter out hidden files and our test files
+                real_contents = [f for f in contents if not f.name.startswith('.')]
                 
-                # At this point, we have a clean directory to work with
-                await self.progress_tracker.update_status("Setting up project structure...")
+                if real_contents:
+                    logger.info(f"Directory exists with contents: {[f.name for f in real_contents]}")
+                    raise ValueError(f"Directory already exists and is not empty: {self.project_path}")
+                else:
+                    logger.info("Directory exists but is empty or contains only temporary files, proceeding")
+
+        except Exception as e:
+            logger.error(f"Directory creation failed: {str(e)}")
+            raise ValueError(f"Failed to create project directory: {str(e)}")
+
+    async def initialize_project(self, config: ProjectConfig) -> None:
+        """Initialize a new project"""
+        try:
+            # Initialize progress tracker if not already initialized
+            if not self.progress_tracker:
+                self.progress_tracker = ProgressTracker(self.project_path)
                 
-                # Create initial project structure
-                await self.progress_tracker.update_status("Creating initial structure")
-                
-                # Create .agent directory for metadata
-                agent_dir = self.project_path / ".agent"
-                agent_dir.mkdir(exist_ok=True)
-                
-                # Save initial project configuration
-                config_file = agent_dir / "config.json"
-                with open(config_file, "w") as f:
-                    import json
-                    json.dump({
-                        "name": config.name,
-                        "type": config.project_type,
-                        "framework": config.framework,
-                        "features": config.features,
-                        "styling": config.styling,
-                        "created_at": str(datetime.datetime.now())
-                    }, f, indent=2)
-                
-            except Exception as e:
-                if not str(e).startswith("DIRECTORY_EXISTS:"):
-                    logger.error(f"Directory setup failed: {str(e)}")
-                raise
+            await self.progress_tracker.update_status("Starting project initialization")
             
-            # Determine framework based on project_type
-            if config.project_type in ["fullstack", "frontend", "mobile", "admin", "ecommerce", "blog", "interactive"]:
-                config.framework = "Next.js"  # Default to Next.js for most project types
-            elif config.project_type == "backend":
-                config.framework = "Node"
+            # Set up project path
+            self.project_path = Path(config.project_location) / config.name
+            self.current_project = config  # Store current project config
             
+            # Check permissions
+            await self.progress_tracker.update_status("Checking permissions...")
+            await self._check_permissions()
+            
+            # Create project directory
+            await self.progress_tracker.update_status("Creating project directory...")
+            await self._create_project_directory()
+            
+            # Set up project structure
+            await self.progress_tracker.update_status("Setting up project structure...")
+            await self.progress_tracker.update_status("Creating initial structure")
+            
+            # Determine framework and features
+            if not config.framework:
+                if config.project_type == "backend":
+                    config.framework = "Node"
+                else:
+                    config.framework = "Next.js"
             logger.info(f"Using framework: {config.framework}")
             
-            # Continue with project initialization
+            # Analyze requirements with enhanced feature detection
             await self.progress_tracker.update_status("Analyzing project requirements")
+            requirements = await self.requirement_analyzer.analyze_project_requirements(config, self.project_path)
             
-            # Analyze requirements based on config
-            try:
-                # First analyze the project type and framework
-                framework_requirements = {
-                    "Next.js": {
-                        "features": ["routing", "server-side-rendering"],
-                        "dependencies": ["next", "react", "react-dom"],
-                        "styles": ["tailwind"]
-                    },
-                    "React": {
-                        "features": ["client-side-routing"],
-                        "dependencies": ["react", "react-dom", "react-router-dom"],
-                        "styles": ["styled-components"]
-                    },
-                    "Node": {
-                        "features": ["api", "routing"],
-                        "dependencies": ["express", "cors", "helmet"],
-                        "database": {"needed": True, "type": "mongodb"}
-                    }
-                }
-                
-                # Get base requirements for the chosen framework
-                base_requirements = framework_requirements.get(config.framework, {})
-                
-                # Merge with analyzed requirements
-                requirements = await self.requirement_analyzer.analyze_project_requirements(config, self.project_path)
-                
-                # Combine base and analyzed requirements safely
-                merged_requirements = {}
-                
-                # Helper function to merge lists without duplicates
-                def merge_lists(list1, list2):
-                    return list(set(list1 + list2))
-                
-                # Helper function to merge dictionaries recursively
-                def merge_dicts(dict1, dict2):
-                    result = dict1.copy()
-                    for key, value in dict2.items():
-                        if key in result:
-                            if isinstance(value, list) and isinstance(result[key], list):
-                                result[key] = merge_lists(result[key], value)
-                            elif isinstance(value, dict) and isinstance(result[key], dict):
-                                result[key] = merge_dicts(result[key], value)
-                            else:
-                                result[key] = value
-                        else:
-                            result[key] = value
-                    return result
-                
-                # Merge requirements
-                merged_requirements = merge_dicts(base_requirements, requirements)
-                
-                logger.info(f"Base requirements: {base_requirements}")
-                logger.info(f"Analyzed requirements: {requirements}")
-                logger.info(f"Merged requirements: {merged_requirements}")
-                
-                requirements = merged_requirements
-                        
-            except Exception as e:
-                logger.error(f"Requirements analysis failed: {str(e)}")
-                raise Exception(f"Failed to analyze project requirements: {str(e)}")
+            # Use existing project builder instance
+            await self.project_builder.build_project(config, requirements)
             
-            # Initialize project structure
-            await self.progress_tracker.update_status("Creating project structure")
-            try:
-                await self.project_builder.initialize_project(config, requirements, self.project_path)
-            except Exception as e:
-                logger.error(f"Project structure initialization failed: {str(e)}")
-                raise Exception(f"Failed to initialize project structure: {str(e)}")
-
             # Set up dependencies
             await self.progress_tracker.update_status("Setting up dependencies")
-            try:
-                await self.dependency_manager.setup_project_dependencies(config, self.project_path)
-            except Exception as e:
-                logger.error(f"Dependency setup failed: {str(e)}")
-                raise Exception(f"Failed to set up dependencies: {str(e)}")
-
-            # Project creation successful
+            await self.dependency_manager.setup_project_dependencies(config, self.project_path)
+            
             await self.progress_tracker.update_status("Project initialization complete")
             logger.info("Project initialization completed successfully")
-
-        except ValueError as e:
-            error_msg = str(e)
-            await self.progress_tracker.update_status("Project initialization failed")
-            if error_msg.startswith("DIRECTORY_EXISTS:"):
-                raise
-            raise Exception(f"Project initialization failed: {error_msg}")
+            
         except Exception as e:
             await self.progress_tracker.update_status("Project initialization failed")
-            # Clean up if we created the directory but failed later
-            if created_directory and self.project_path and self.project_path.exists():
-                try:
-                    import shutil
-                    logger.info(f"Cleaning up failed project directory: {self.project_path}")
-                    shutil.rmtree(self.project_path)
-                except Exception as cleanup_error:
-                    logger.error(f"Failed to clean up project directory: {str(cleanup_error)}")
             raise Exception(f"Project initialization failed: {str(e)}")
 
     async def _extract_project_config(self) -> ProjectConfig:
@@ -561,32 +465,85 @@ class MetaAgent:
         if not self.progress_tracker:
             self.progress_tracker = ProgressTracker(self.project_path)
 
-        self.progress_tracker.update_status(f"Processing request: {description}")
+        await self.progress_tracker.update_status(f"Processing request: {description}")
 
         try:
             # Analyze the request
-            self.progress_tracker.update_status("Analyzing request")
+            await self.progress_tracker.update_status("Analyzing request")
             requirements = await self.requirement_analyzer.analyze_user_request(description)
+            
+            # Handle code changes first
+            if requirements.get("code_changes"):
+                await self.progress_tracker.update_status("Processing code changes")
+                code_changes = requirements["code_changes"]
+                
+                # Handle new files
+                for file_info in code_changes.get("files_to_create", []):
+                    await self.progress_tracker.update_status(f"Creating file: {file_info['name']}")
+                    file_path = file_info["path"] or self._determine_file_path(file_info["name"])
+                    await self.project_builder.create_file(file_path, file_info["description"])
+                
+                # Handle file modifications
+                for file_info in code_changes.get("files_to_modify", []):
+                    await self.progress_tracker.update_status(f"Modifying file: {file_info['name']}")
+                    await self.project_builder.modify_file(file_info["name"], file_info["element"], file_info["description"])
+                
+                # Handle code block generation
+                for block_info in code_changes.get("code_blocks", []):
+                    await self.progress_tracker.update_status(f"Generating {block_info['type']}: {block_info['name']}")
+                    await self.project_builder.generate_code_block(block_info)
 
-            # Update project based on requirements
-            if "components" in requirements:
-                self.progress_tracker.update_status("Updating components")
-                await self.project_builder.update_components()
+            # Handle component updates
+            if requirements.get("components"):
+                await self.progress_tracker.update_status("Updating components")
+                for component in requirements["components"]:
+                    await self.progress_tracker.update_status(f"Creating component: {component['name']}")
+                    await self.project_builder.create_component(component)
 
-            if "dependencies" in requirements:
-                self.progress_tracker.update_status("Updating dependencies")
-                await self.dependency_manager.update_dependencies()
+            # Handle dependency updates
+            if requirements.get("dependencies"):
+                await self.progress_tracker.update_status("Updating dependencies")
+                await self.dependency_manager.update_dependencies(requirements["dependencies"])
 
-            if "documentation" in requirements:
-                self.progress_tracker.update_status("Updating documentation")
-                await self.documentation_generator.update_documentation()
+            # Handle API endpoints
+            if requirements.get("api_endpoints"):
+                await self.progress_tracker.update_status("Creating API endpoints")
+                for endpoint in requirements["api_endpoints"]:
+                    await self.project_builder.create_api_endpoint(endpoint)
 
-            self.progress_tracker.update_status("Request processed successfully")
+            # Handle database changes
+            if requirements.get("database", {}).get("needed"):
+                await self.progress_tracker.update_status("Setting up database")
+                db_info = requirements["database"]
+                await self.project_builder.setup_database(db_info)
+
+            await self.progress_tracker.update_status("Request processed successfully")
 
         except Exception as e:
             error_msg = str(e)
-            self.progress_tracker.update_status("Failed to process request", {"error": error_msg})
-            raise Exception(f"Failed to process request: {error_msg}") 
+            await self.progress_tracker.update_status("Failed to process request", {"error": error_msg})
+            raise Exception(f"Failed to process request: {error_msg}")
+
+    def _determine_file_path(self, filename: str) -> str:
+        """Determine the appropriate path for a new file based on its name and type"""
+        if filename.endswith(('.component.tsx', '.component.jsx')):
+            return f"src/components/{filename}"
+        elif filename.endswith(('.page.tsx', '.page.jsx')):
+            return f"src/pages/{filename}"
+        elif filename.endswith(('.api.ts', '.api.js')):
+            return f"src/api/{filename}"
+        elif filename.endswith(('.util.ts', '.util.js')):
+            return f"src/utils/{filename}"
+        elif filename.endswith(('.hook.ts', '.hook.js')):
+            return f"src/hooks/{filename}"
+        elif filename.endswith(('.context.tsx', '.context.jsx')):
+            return f"src/contexts/{filename}"
+        elif filename.endswith(('.model.ts', '.model.js')):
+            return f"src/models/{filename}"
+        elif filename.endswith(('.test.ts', '.test.js')):
+            return f"tests/{filename}"
+        else:
+            return f"src/{filename}"
 
     async def cleanup(self) -> None:
         """Clean up any resources or temporary files"""
