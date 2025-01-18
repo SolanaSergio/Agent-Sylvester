@@ -30,4 +30,8 @@ requests>=2.31.0
 pyyaml>=6.0.1
 
 # CLI dependencies
-questionary>=2.0.1 
+questionary>=2.0.1
+
+# Graph and Version Management
+networkx>=3.2.1
+packaging>=23.2 

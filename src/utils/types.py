@@ -86,7 +86,10 @@ class ComponentStatus:
 @dataclass
 class DependencyInfo:
     name: str
-    version: str
+    required_version: str
+    installed_version: Optional[str]
+    latest_version: Optional[str]
+    status: str  # 'missing', 'outdated', 'current', 'ahead', or 'unknown'
 
 @dataclass
 class ProjectStatus:

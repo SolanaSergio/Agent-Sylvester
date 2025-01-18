@@ -1,126 +1,423 @@
 import asyncio
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 from src.utils.types import ProjectConfig, ProjectStatus, ComponentStatus, DependencyInfo
-from src.managers.dependency_manager import DependencyManager
-from src.generators.documentation_generator import DocumentationGenerator
-from src.analyzers.requirement_analyzer import RequirementAnalyzer
-from src.analyzers.pattern_analyzer import PatternAnalyzer
-from src.builders.project_builder import ProjectBuilder
+# Import managers only when needed in methods to avoid circular imports
+import logging
 from src.agents.progress_tracker import ProgressTracker
-from src.scrapers.web_scraper import WebScraper
+import datetime
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class MetaAgent:
     def __init__(self):
+        self._initialize_managers()
+        self.current_project: Optional[ProjectConfig] = None
+        self.project_path: Optional[Path] = None
+        self.agent_root = Path(__file__).parent.parent.parent  # Points to Auto Agent root
+        self.progress_tracker: Optional[ProgressTracker] = None  # Initialize as None
+        
+        # Define supported frameworks and their requirements
+        self.supported_frameworks = {
+            "Next.js": {
+                "features": ["routing", "server-side-rendering"],
+                "dependencies": ["next", "react", "react-dom"],
+                "styles": ["tailwind", "styled-components", "sass", "css-modules"]
+            },
+            "React": {
+                "features": ["client-side-routing"],
+                "dependencies": ["react", "react-dom", "react-router-dom"],
+                "styles": ["styled-components", "tailwind", "sass", "css-modules"]
+            },
+            "Node": {
+                "features": ["api", "routing"],
+                "dependencies": ["express", "cors", "helmet"],
+                "database": {"needed": True, "type": "mongodb"}
+            }
+        }
+
+    def _initialize_managers(self):
+        # Lazy imports to avoid circular dependencies
+        from src.managers.dependency_manager import DependencyManager
+        from src.generators.documentation_generator import DocumentationGenerator
+        from src.analyzers.requirement_analyzer import RequirementAnalyzer
+        from src.analyzers.pattern_analyzer import PatternAnalyzer
+        from src.builders.project_builder import ProjectBuilder
+        from src.scrapers.web_scraper import WebScraper
+
         self.dependency_manager = DependencyManager()
         self.documentation_generator = DocumentationGenerator()
         self.requirement_analyzer = RequirementAnalyzer()
         self.pattern_analyzer = PatternAnalyzer()
         self.project_builder = ProjectBuilder()
-        self.progress_tracker = ProgressTracker()
         self.web_scraper = WebScraper()
-        self.current_project: Optional[ProjectConfig] = None
-        self.project_path: Optional[Path] = None
 
     async def initialize_project(self, config: ProjectConfig) -> None:
         """Initialize a new project with the given configuration"""
-        self.current_project = config
-        self.project_path = Path(config.name)
+        created_directory = False
+        try:
+            # Convert to absolute path and resolve any symlinks
+            if config.project_location.lower() == "agent":
+                # Create in Auto Agent directory
+                project_location = self.agent_root
+            else:
+                project_location = Path(config.project_location).resolve()
+            
+            self.project_path = project_location / config.name
+            self.current_project = config
+            
+            logger.info(f"Agent root: {self.agent_root}")
+            logger.info(f"Project location: {project_location}")
+            logger.info(f"Target project path: {self.project_path}")
+            
+            # Initialize progress tracker first
+            self.progress_tracker = ProgressTracker(self.project_path)
+            await self.progress_tracker.update_status("Starting project initialization")
+            
+            # Check parent directory permissions first
+            await self.progress_tracker.update_status("Checking permissions...")
+            if not project_location.exists():
+                raise ValueError(f"Location does not exist: {project_location}")
+            
+            # Try to create a temporary file to test write permissions
+            test_file = project_location / f".test_{config.name}"
+            try:
+                test_file.touch()
+                test_file.unlink()  # Remove the test file
+                logger.info("Write permission test passed")
+            except (PermissionError, OSError) as e:
+                logger.error(f"Permission test failed: {str(e)}")
+                raise ValueError(f"No write permission in directory: {project_location}\nError: {str(e)}")
+            
+            # Create or verify project directory
+            await self.progress_tracker.update_status("Creating project directory...")
+            try:
+                # First, try to create the directory
+                try:
+                    self.project_path.mkdir(parents=True)
+                    created_directory = True
+                    logger.info("Project directory created successfully")
+                except FileExistsError:
+                    # If directory exists, check if it's empty or only contains our test files
+                    contents = list(self.project_path.iterdir())
+                    # Filter out hidden files and our test files
+                    real_contents = [f for f in contents if not f.name.startswith('.')]
+                    
+                    if real_contents:
+                        logger.info(f"Directory exists with contents: {[f.name for f in real_contents]}")
+                        raise ValueError(f"DIRECTORY_EXISTS:{self.project_path}")
+                    else:
+                        logger.info("Directory exists but is empty or contains only temporary files, proceeding")
+                
+                # At this point, we have a clean directory to work with
+                await self.progress_tracker.update_status("Setting up project structure...")
+                
+                # Create initial project structure
+                await self.progress_tracker.update_status("Creating initial structure")
+                
+                # Create .agent directory for metadata
+                agent_dir = self.project_path / ".agent"
+                agent_dir.mkdir(exist_ok=True)
+                
+                # Save initial project configuration
+                config_file = agent_dir / "config.json"
+                with open(config_file, "w") as f:
+                    import json
+                    json.dump({
+                        "name": config.name,
+                        "type": config.project_type,
+                        "framework": config.framework,
+                        "features": config.features,
+                        "styling": config.styling,
+                        "created_at": str(datetime.datetime.now())
+                    }, f, indent=2)
+                
+            except Exception as e:
+                if not str(e).startswith("DIRECTORY_EXISTS:"):
+                    logger.error(f"Directory setup failed: {str(e)}")
+                raise
+            
+            # Determine framework based on project_type
+            if config.project_type in ["fullstack", "frontend", "mobile", "admin", "ecommerce", "blog", "interactive"]:
+                config.framework = "Next.js"  # Default to Next.js for most project types
+            elif config.project_type == "backend":
+                config.framework = "Node"
+            
+            logger.info(f"Using framework: {config.framework}")
+            
+            # Continue with project initialization
+            await self.progress_tracker.update_status("Analyzing project requirements")
+            
+            # Analyze requirements based on config
+            try:
+                # First analyze the project type and framework
+                framework_requirements = {
+                    "Next.js": {
+                        "features": ["routing", "server-side-rendering"],
+                        "dependencies": ["next", "react", "react-dom"],
+                        "styles": ["tailwind"]
+                    },
+                    "React": {
+                        "features": ["client-side-routing"],
+                        "dependencies": ["react", "react-dom", "react-router-dom"],
+                        "styles": ["styled-components"]
+                    },
+                    "Node": {
+                        "features": ["api", "routing"],
+                        "dependencies": ["express", "cors", "helmet"],
+                        "database": {"needed": True, "type": "mongodb"}
+                    }
+                }
+                
+                # Get base requirements for the chosen framework
+                base_requirements = framework_requirements.get(config.framework, {})
+                
+                # Merge with analyzed requirements
+                requirements = await self.requirement_analyzer.analyze_project_requirements(config, self.project_path)
+                
+                # Combine base and analyzed requirements safely
+                merged_requirements = {}
+                
+                # Helper function to merge lists without duplicates
+                def merge_lists(list1, list2):
+                    return list(set(list1 + list2))
+                
+                # Helper function to merge dictionaries recursively
+                def merge_dicts(dict1, dict2):
+                    result = dict1.copy()
+                    for key, value in dict2.items():
+                        if key in result:
+                            if isinstance(value, list) and isinstance(result[key], list):
+                                result[key] = merge_lists(result[key], value)
+                            elif isinstance(value, dict) and isinstance(result[key], dict):
+                                result[key] = merge_dicts(result[key], value)
+                            else:
+                                result[key] = value
+                        else:
+                            result[key] = value
+                    return result
+                
+                # Merge requirements
+                merged_requirements = merge_dicts(base_requirements, requirements)
+                
+                logger.info(f"Base requirements: {base_requirements}")
+                logger.info(f"Analyzed requirements: {requirements}")
+                logger.info(f"Merged requirements: {merged_requirements}")
+                
+                requirements = merged_requirements
+                        
+            except Exception as e:
+                logger.error(f"Requirements analysis failed: {str(e)}")
+                raise Exception(f"Failed to analyze project requirements: {str(e)}")
+            
+            # Initialize project structure
+            await self.progress_tracker.update_status("Creating project structure")
+            try:
+                await self.project_builder.initialize_project(config, requirements, self.project_path)
+            except Exception as e:
+                logger.error(f"Project structure initialization failed: {str(e)}")
+                raise Exception(f"Failed to initialize project structure: {str(e)}")
+
+            # Set up dependencies
+            await self.progress_tracker.update_status("Setting up dependencies")
+            try:
+                await self.dependency_manager.setup_project_dependencies(config, self.project_path)
+            except Exception as e:
+                logger.error(f"Dependency setup failed: {str(e)}")
+                raise Exception(f"Failed to set up dependencies: {str(e)}")
+
+            # Project creation successful
+            await self.progress_tracker.update_status("Project initialization complete")
+            logger.info("Project initialization completed successfully")
+
+        except ValueError as e:
+            error_msg = str(e)
+            await self.progress_tracker.update_status("Project initialization failed")
+            if error_msg.startswith("DIRECTORY_EXISTS:"):
+                raise
+            raise Exception(f"Project initialization failed: {error_msg}")
+        except Exception as e:
+            await self.progress_tracker.update_status("Project initialization failed")
+            # Clean up if we created the directory but failed later
+            if created_directory and self.project_path and self.project_path.exists():
+                try:
+                    import shutil
+                    logger.info(f"Cleaning up failed project directory: {self.project_path}")
+                    shutil.rmtree(self.project_path)
+                except Exception as cleanup_error:
+                    logger.error(f"Failed to clean up project directory: {str(cleanup_error)}")
+            raise Exception(f"Project initialization failed: {str(e)}")
+
+    async def _extract_project_config(self) -> ProjectConfig:
+        """Extract project configuration from an existing project"""
+        try:
+            # Check for package.json
+            package_json = self.project_path / "package.json"
+            if package_json.exists():
+                with open(package_json) as f:
+                    import json
+                    data = json.load(f)
+                    
+                    # Determine project type and framework from dependencies
+                    dependencies = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+                    
+                    if "next" in dependencies:
+                        project_type = "fullstack"
+                        framework = "Next.js"
+                    elif "react" in dependencies and not "next" in dependencies:
+                        project_type = "frontend"
+                        framework = "React"
+                    elif "express" in dependencies:
+                        project_type = "backend"
+                        framework = "Node"
+                    else:
+                        project_type = "unknown"
+                        framework = None
+                    
+                    # Determine styling from dependencies
+                    styling = None
+                    if "tailwindcss" in dependencies:
+                        styling = "tailwind"
+                    elif "styled-components" in dependencies:
+                        styling = "styled-components"
+                    elif "sass" in dependencies:
+                        styling = "sass"
+                    
+                    # Extract features based on dependencies
+                    features = []
+                    if "next-auth" in dependencies or "@auth0/nextjs-auth0" in dependencies:
+                        features.append("auth")
+                    if "mongoose" in dependencies or "prisma" in dependencies:
+                        features.append("database")
+                    if "react-query" in dependencies or "swr" in dependencies:
+                        features.append("api")
+                    if "chart.js" in dependencies or "@nivo/core" in dependencies:
+                        features.append("charts")
+                    
+                    return ProjectConfig(
+                        name=self.project_path.name,
+                        project_type=project_type,
+                        framework=framework,
+                        features=features,
+                        styling=styling,
+                        project_location=str(self.project_path.parent),
+                        description=data.get("description", ""),
+                        version=data.get("version", "0.1.0"),
+                        author=data.get("author", None),
+                        license=data.get("license", "MIT")
+                    )
+            
+            # If no package.json, try to infer from directory structure
+            if (self.project_path / "pages").exists() or (self.project_path / "app").exists():
+                return ProjectConfig(
+                    name=self.project_path.name,
+                    project_type="fullstack",
+                    framework="Next.js",
+                    features=[],
+                    styling=None,
+                    project_location=str(self.project_path.parent)
+                )
+            
+            raise ValueError("Could not determine project configuration")
+            
+        except Exception as e:
+            logger.error(f"Failed to extract project configuration: {str(e)}")
+            raise ValueError(f"Failed to extract project configuration: {str(e)}")
+
+    def _validate_framework_requirements(self, framework: str, requirements: dict) -> None:
+        """Validate that framework requirements are supported"""
+        if framework not in self.supported_frameworks:
+            raise ValueError(f"Unsupported framework: {framework}")
+            
+        framework_reqs = self.supported_frameworks[framework]
         
-        # Analyze requirements based on config
-        requirements = await self.requirement_analyzer.analyze_project_requirements(config)
+        # Validate styling
+        if "styles" in requirements and requirements["styles"]:
+            if not any(style in framework_reqs["styles"] for style in requirements["styles"]):
+                raise ValueError(f"Unsupported styling for {framework}: {requirements['styles']}")
         
-        # Initialize project structure
-        await self.project_builder.initialize_project(config, requirements)
-        
-        # Set up dependencies
-        await self.dependency_manager.setup_project_dependencies(config)
-        
-        # Generate project structure
-        await self.project_builder.generate_structure()
-        
-        # Generate initial components
-        await self.project_builder.generate_components()
-        
-        # Generate documentation
-        await self.documentation_generator.generate_project_documentation(config)
-        
-        self.progress_tracker.update_status("Project initialized")
+        # Validate features
+        if "features" in requirements and requirements["features"]:
+            if not all(feature in framework_reqs["features"] for feature in requirements["features"]):
+                raise ValueError(f"Some features are not supported by {framework}")
 
     async def import_project(self, project_path: str) -> None:
         """Import and analyze an existing project"""
-        self.project_path = Path(project_path)
-        if not self.project_path.exists():
-            raise FileNotFoundError(f"Project path does not exist: {project_path}")
-        
-        # Analyze project structure
-        structure = await self.pattern_analyzer.analyze_project_structure(self.project_path)
-        
-        # Analyze patterns
-        patterns = await self.pattern_analyzer.analyze_patterns()
-        
-        # Extract project configuration
-        config = await self._extract_project_config()
-        self.current_project = config
-        
-        # Analyze requirements
-        requirements = await self.requirement_analyzer.analyze_project_requirements(config)
-        
-        # Update project status
-        self.progress_tracker.update_status("Project imported")
+        try:
+            self.project_path = Path(project_path)
+            if not self.project_path.exists():
+                raise FileNotFoundError(f"Project path does not exist: {project_path}")
+            
+            # Initialize progress tracker
+            self.progress_tracker = ProgressTracker(self.project_path)
+            await self.progress_tracker.update_status("Starting project import")
+            
+            try:
+                # Analyze project structure
+                await self.progress_tracker.update_status("Analyzing project structure")
+                structure = await self.pattern_analyzer.analyze_project_structure(self.project_path)
+                
+                # Analyze patterns
+                await self.progress_tracker.update_status("Analyzing patterns")
+                patterns = await self.pattern_analyzer.analyze_patterns(self.project_path)
+                
+                # Extract project configuration
+                await self.progress_tracker.update_status("Extracting project configuration")
+                config = await self._extract_project_config()
+                self.current_project = config
+                
+                # Analyze requirements
+                await self.progress_tracker.update_status("Analyzing requirements")
+                requirements = await self.requirement_analyzer.analyze_project_requirements(config, self.project_path)
+                
+                # Validate framework requirements
+                if config.framework:
+                    self._validate_framework_requirements(config.framework, requirements)
+                
+                await self.progress_tracker.update_status("Project import complete")
+                
+            except Exception as e:
+                await self.progress_tracker.update_status("Project import failed", {"error": str(e)})
+                raise
+                
+        except Exception as e:
+            if self.progress_tracker:
+                await self.progress_tracker.update_status("Project import failed", {"error": str(e)})
+            raise ValueError(f"Project import failed: {str(e)}")
 
     async def update_project(self) -> None:
         """Update the current project"""
         if not self.current_project or not self.project_path:
             raise ValueError("No project is currently active")
+            
+        if not self.progress_tracker:
+            self.progress_tracker = ProgressTracker(self.project_path)
+            
+        self.progress_tracker.update_status("Starting project update")
         
-        # Analyze current state
-        current_state = await self.requirement_analyzer.analyze_current_state()
-        
-        # Update dependencies
-        await self.dependency_manager.update_dependencies()
-        
-        # Update components
-        await self.project_builder.update_components()
-        
-        # Update documentation
-        await self.documentation_generator.update_documentation()
-        
-        self.progress_tracker.update_status("Project updated")
-
-    async def _extract_project_config(self) -> ProjectConfig:
-        """Extract configuration from existing project"""
         try:
-            # Try to read package.json
-            package_json = self.project_path / "package.json"
-            if package_json.exists():
-                import json
-                with open(package_json) as f:
-                    data = json.load(f)
-                    
-                # Determine framework from dependencies
-                framework = "Next.js" if "next" in data.get("dependencies", {}) else "React"
-                if "vue" in data.get("dependencies", {}):
-                    framework = "Vue"
-                elif "@angular/core" in data.get("dependencies", {}):
-                    framework = "Angular"
-                
-                return ProjectConfig(
-                    name=data.get("name", self.project_path.name),
-                    description=data.get("description", ""),
-                    framework=framework,
-                    features=[]  # Will be determined by analysis
-                )
-            else:
-                # Fallback to directory name and basic config
-                return ProjectConfig(
-                    name=self.project_path.name,
-                    description="",
-                    framework="React",  # Default to React
-                    features=[]
-                )
+            # Analyze current state
+            self.progress_tracker.update_status("Analyzing current state")
+            current_state = await self.requirement_analyzer.analyze_current_state()
+            
+            # Update dependencies
+            self.progress_tracker.update_status("Updating dependencies")
+            await self.dependency_manager.update_dependencies()
+            
+            # Update components
+            self.progress_tracker.update_status("Updating components")
+            await self.project_builder.update_components()
+            
+            # Update documentation
+            self.progress_tracker.update_status("Updating documentation")
+            await self.documentation_generator.update_documentation()
+            
+            self.progress_tracker.update_status("Project update complete")
+            
         except Exception as e:
-            raise Exception(f"Failed to extract project configuration: {str(e)}")
+            self.progress_tracker.update_status("Project update failed", {"error": str(e)})
+            raise
 
     async def generate_project_structure(self) -> None:
         """Generate the project's directory structure and base files"""
@@ -254,4 +551,59 @@ class MetaAgent:
             if dir_path.exists() and not any(dir_path.iterdir()):
                 issues.append(f"Empty {dir_name} directory")
                 
-        return issues 
+        return issues
+
+    async def process_user_input(self, description: str) -> None:
+        """Process user input for project modifications"""
+        if not self.current_project or not self.project_path:
+            raise ValueError("No active project")
+
+        if not self.progress_tracker:
+            self.progress_tracker = ProgressTracker(self.project_path)
+
+        self.progress_tracker.update_status(f"Processing request: {description}")
+
+        try:
+            # Analyze the request
+            self.progress_tracker.update_status("Analyzing request")
+            requirements = await self.requirement_analyzer.analyze_user_request(description)
+
+            # Update project based on requirements
+            if "components" in requirements:
+                self.progress_tracker.update_status("Updating components")
+                await self.project_builder.update_components()
+
+            if "dependencies" in requirements:
+                self.progress_tracker.update_status("Updating dependencies")
+                await self.dependency_manager.update_dependencies()
+
+            if "documentation" in requirements:
+                self.progress_tracker.update_status("Updating documentation")
+                await self.documentation_generator.update_documentation()
+
+            self.progress_tracker.update_status("Request processed successfully")
+
+        except Exception as e:
+            error_msg = str(e)
+            self.progress_tracker.update_status("Failed to process request", {"error": error_msg})
+            raise Exception(f"Failed to process request: {error_msg}") 
+
+    async def cleanup(self) -> None:
+        """Clean up any resources or temporary files"""
+        try:
+            if self.project_path and self.project_path.exists():
+                # Clean up any temporary files
+                temp_files = list(self.project_path.glob(".test_*"))
+                for temp_file in temp_files:
+                    try:
+                        temp_file.unlink()
+                    except Exception as e:
+                        logger.warning(f"Failed to clean up temporary file {temp_file}: {str(e)}")
+                        
+            if self.progress_tracker:
+                await self.progress_tracker.update_status("Cleanup complete")
+                
+        except Exception as e:
+            logger.error(f"Cleanup failed: {str(e)}")
+            if self.progress_tracker:
+                await self.progress_tracker.update_status("Cleanup failed", {"error": str(e)}) 

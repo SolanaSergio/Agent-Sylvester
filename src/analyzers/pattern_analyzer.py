@@ -7,8 +7,19 @@ from src.utils.types import Pattern, StylePattern, LayoutPattern, AccessibilityP
 class PatternAnalyzer:
     """Analyzes project patterns and structures"""
     
-    async def analyze_patterns(self) -> Dict:
+    def __init__(self):
+        self.project_dir: Optional[Path] = None
+
+    async def analyze_patterns(self, project_path: Optional[Path] = None) -> Dict:
         """Analyze all patterns in the project"""
+        if project_path:
+            self.project_dir = project_path
+        elif not self.project_dir:
+            raise ValueError("Project directory not set")
+
+        if not self.project_dir.exists():
+            raise ValueError(f"Project directory {self.project_dir} does not exist")
+
         try:
             return {
                 "components": await self._analyze_component_patterns(),
@@ -24,18 +35,18 @@ class PatternAnalyzer:
     async def _analyze_component_patterns(self) -> List[Pattern]:
         """Analyze component patterns"""
         patterns = []
-        components_dir = Path("src/components")
+        components_dir = self.project_dir / "src/components"
         
         if not components_dir.exists():
             return patterns
             
         # Analyze component files
         for file_path in components_dir.glob("**/*.{tsx,jsx}"):
-            with open(file_path) as f:
-                content = f.read()
-                
-            # Parse the component
             try:
+                with open(file_path) as f:
+                    content = f.read()
+                    
+                # Parse the component
                 tree = ast.parse(content)
                 
                 # Extract component elements and attributes
@@ -44,7 +55,7 @@ class PatternAnalyzer:
                 
                 # Calculate frequency and confidence
                 frequency = len(elements)
-                confidence = self._calculate_confidence(elements, attributes)
+                confidence = self._calculate_pattern_confidence(elements, attributes)
                 
                 patterns.append(Pattern(
                     type="component",
@@ -54,7 +65,10 @@ class PatternAnalyzer:
                     elements=elements,
                     attributes=attributes
                 ))
-            except Exception:
+            except Exception as e:
+                # Log error but continue with other components
+                import logging
+                logging.error(f"Error analyzing component {file_path}: {str(e)}")
                 continue
                 
         return patterns
@@ -62,78 +76,80 @@ class PatternAnalyzer:
     async def _analyze_style_patterns(self) -> List[StylePattern]:
         """Analyze style patterns"""
         patterns = []
-        styles_dir = Path("src/styles")
+        styles_dir = self.project_dir / "src/styles"
         
         if not styles_dir.exists():
             return patterns
             
         # Analyze style files
         for file_path in styles_dir.glob("**/*.{css,scss}"):
-            with open(file_path) as f:
-                content = f.read()
-                
-            # Extract colors
-            colors = re.findall(r'#[0-9a-fA-F]{3,6}|rgb\([^)]+\)|rgba\([^)]+\)', content)
-            if colors:
-                patterns.append(StylePattern(
-                    type="color",
-                    values=list(set(colors)),
-                    frequency=len(colors),
-                    context=file_path.stem
-                ))
-                
-            # Extract other style patterns...
+            try:
+                with open(file_path) as f:
+                    content = f.read()
+                    
+                # Extract colors
+                colors = re.findall(r'#[0-9a-fA-F]{3,6}|rgb\([^)]+\)|rgba\([^)]+\)', content)
+                if colors:
+                    patterns.append(StylePattern(
+                        type="color",
+                        values=list(set(colors)),
+                        frequency=len(colors),
+                        context=file_path.stem
+                    ))
+                    
+                # Extract spacing patterns
+                spacing_patterns = re.findall(r'margin|padding|gap|space-[xy]', content)
+                if spacing_patterns:
+                    patterns.append(StylePattern(
+                        type="spacing",
+                        values=list(set(spacing_patterns)),
+                        frequency=len(spacing_patterns),
+                        context=file_path.stem
+                    ))
+                    
+                # Extract typography patterns
+                typography_patterns = re.findall(r'font-(?:family|size|weight)|line-height|letter-spacing', content)
+                if typography_patterns:
+                    patterns.append(StylePattern(
+                        type="typography",
+                        values=list(set(typography_patterns)),
+                        frequency=len(typography_patterns),
+                        context=file_path.stem
+                    ))
+            except Exception as e:
+                import logging
+                logging.error(f"Error analyzing styles in {file_path}: {str(e)}")
+                continue
                 
         return patterns
 
     def _extract_elements(self, content: str) -> List[str]:
-        """Extract HTML elements from component"""
-        elements = re.findall(r'<([a-zA-Z][a-zA-Z0-9]*)', content)
-        return list(set(elements))
+        """Extract HTML/JSX elements from component content"""
+        # Simple regex for element extraction - could be improved with a proper parser
+        element_pattern = r"<([a-zA-Z][a-zA-Z0-9]*)"
+        return [match.group(1) for match in re.finditer(element_pattern, content)]
 
     def _extract_attributes(self, content: str) -> Dict[str, str]:
-        """Extract attributes from component"""
-        attributes = {}
-        
-        # Find className attributes
-        class_matches = re.findall(r'className=["\']([^"\']+)["\']', content)
-        if class_matches:
-            attributes["className"] = " ".join(class_matches)
-            
-        # Find role attributes
-        role_matches = re.findall(r'role=["\']([^"\']+)["\']', content)
-        if role_matches:
-            attributes["role"] = role_matches[0]
-            
-        return attributes
+        """Extract element attributes from component content"""
+        # Simple regex for attribute extraction - could be improved with a proper parser
+        attr_pattern = r'([a-zA-Z][a-zA-Z0-9]*)=["\'](.*?)["\']'
+        return {match.group(1): match.group(2) for match in re.finditer(attr_pattern, content)}
 
-    def _calculate_confidence(self, elements: List[str], attributes: Dict[str, str]) -> float:
-        """Calculate confidence score for component pattern"""
-        score = 0.0
+    def _calculate_pattern_confidence(self, elements: List[str], attributes: Dict[str, str]) -> float:
+        """Calculate confidence score for a pattern"""
+        if not elements:
+            return 0.0
+            
+        # Simple confidence calculation based on number of elements and attributes
+        base_confidence = min(len(elements) / 10.0, 1.0)  # More elements = higher confidence, up to 1.0
+        attr_bonus = min(len(attributes) / 20.0, 0.5)     # More attributes = bonus confidence, up to 0.5
         
-        # Score based on number of elements
-        if len(elements) >= 3:
-            score += 0.3
-            
-        # Score based on className presence
-        if "className" in attributes:
-            score += 0.3
-            
-        # Score based on semantic elements
-        semantic_elements = {"header", "main", "footer", "nav", "article", "section"}
-        if any(element in semantic_elements for element in elements):
-            score += 0.2
-            
-        # Score based on accessibility
-        if "role" in attributes:
-            score += 0.2
-            
-        return min(score, 1.0)
+        return min(base_confidence + attr_bonus, 1.0)      # Total confidence capped at 1.0
 
     async def _analyze_layout_patterns(self) -> List[LayoutPattern]:
         """Analyze layout patterns"""
         patterns = []
-        components_dir = Path("src/components")
+        components_dir = self.project_dir / "src/components"
         
         if not components_dir.exists():
             return patterns
@@ -143,22 +159,27 @@ class PatternAnalyzer:
         layout_files.extend(components_dir.glob("**/Page*.{tsx,jsx}"))
         
         for file_path in layout_files:
-            with open(file_path) as f:
-                content = f.read()
+            try:
+                with open(file_path) as f:
+                    content = f.read()
+                    
+                # Extract structure
+                structure = self._extract_layout_structure(content)
+                nesting_level = self._calculate_nesting_level(content)
+                grid_system = self._detect_grid_system(content)
+                breakpoints = self._extract_breakpoints(content)
                 
-            # Extract structure
-            structure = self._extract_layout_structure(content)
-            nesting_level = self._calculate_nesting_level(content)
-            grid_system = self._detect_grid_system(content)
-            breakpoints = self._extract_breakpoints(content)
-            
-            patterns.append(LayoutPattern(
-                type=self._determine_layout_type(structure),
-                structure=structure,
-                nesting_level=nesting_level,
-                grid_system=grid_system,
-                breakpoints=breakpoints
-            ))
+                patterns.append(LayoutPattern(
+                    type=self._determine_layout_type(structure),
+                    structure=structure,
+                    nesting_level=nesting_level,
+                    grid_system=grid_system,
+                    breakpoints=breakpoints
+                ))
+            except Exception as e:
+                import logging
+                logging.error(f"Error analyzing layout in {file_path}: {str(e)}")
+                continue
                 
         return patterns
 

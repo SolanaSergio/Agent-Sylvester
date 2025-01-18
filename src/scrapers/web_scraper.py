@@ -249,10 +249,10 @@ class WebScraper:
                 styles[property.strip()] = value.strip()
         return styles
 
-    async def save_component(self, component: ComponentInfo, output_dir: Path) -> None:
+    async def save_component(self, component: ComponentInfo, project_path: Path) -> None:
         """Save scraped component to file"""
         try:
-            component_dir = output_dir / 'components' / component.name.lower()
+            component_dir = project_path / 'components' / component.name.lower()
             component_dir.mkdir(parents=True, exist_ok=True)
             
             # Save component HTML

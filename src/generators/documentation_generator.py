@@ -1,508 +1,465 @@
-from typing import Dict, List, Optional, Union, Any
+import asyncio
 from pathlib import Path
-import ast
-import inspect
+from typing import Dict, List, Optional
 import json
-import logging
-import re
-from dataclasses import dataclass
-from jinja2 import Environment, FileSystemLoader, Template
+from jinja2 import Environment, FileSystemLoader
 from src.utils.types import ProjectConfig
-
-@dataclass
-class DocItem:
-    """Represents a documentation item"""
-    name: str
-    type: str  # 'class', 'function', 'module', 'component', 'api'
-    description: str
-    params: List[Dict[str, str]]
-    returns: Optional[str] = None
-    examples: List[str] = None
-    notes: List[str] = None
-    source: Optional[str] = None
-    usage: Optional[str] = None
+from src.analyzers.pattern_analyzer import PatternAnalyzer
+from src.analyzers.requirement_analyzer import RequirementAnalyzer
+import logging
 
 class DocumentationGenerator:
-    """Generates comprehensive documentation for the project"""
+    """Generates project documentation"""
     
-    def __init__(self, project_root: Union[str, Path], output_dir: Union[str, Path]):
-        self.project_root = Path(project_root)
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self):
+        self.pattern_analyzer = PatternAnalyzer()
+        self.requirement_analyzer = RequirementAnalyzer()
         
-        # Setup template environment
-        templates_dir = self.project_root / "templates" / "docs"
-        templates_dir.mkdir(parents=True, exist_ok=True)
+        # Set up template environment
+        template_dir = Path(__file__).parent / "templates"
+        if not template_dir.exists():
+            template_dir.mkdir(parents=True)
+            self._create_default_templates(template_dir)
+            
         self.template_env = Environment(
-            loader=FileSystemLoader(str(templates_dir)),
-            trim_blocks=True,
-            lstrip_blocks=True
+            loader=FileSystemLoader(template_dir),
+            autoescape=True  # Enable autoescaping for security
         )
-        
-        # Initialize template files
-        self._init_templates()
-        
-        logging.info(f"Documentation Generator initialized with output dir: {output_dir}")
-        
-    def _init_templates(self):
-        """Initialize documentation templates"""
+
+    def _create_default_templates(self, template_dir: Path) -> None:
+        """Create default documentation templates"""
         templates = {
-            'api.md.jinja2': '''
-# {{name}} API Documentation
+            "readme.md.j2": """# {{ project.name }}
 
-{{description}}
-
-## Endpoints
-
-{% for endpoint in endpoints %}
-### {{endpoint.method}} {{endpoint.path}}
-
-{{endpoint.description}}
-
-{% if endpoint.params %}
-#### Parameters
-
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-{% for param in endpoint.params %}
-| {{param.name}} | {{param.type}} | {{param.required}} | {{param.description}} |
-{% endfor %}
-{% endif %}
-
-{% if endpoint.returns %}
-#### Returns
-
-{{endpoint.returns}}
-{% endif %}
-
-{% if endpoint.examples %}
-#### Examples
-
-{% for example in endpoint.examples %}
-```{{example.language}}
-{{example.code}}
-```
-{% endfor %}
-{% endif %}
-
-{% endfor %}
-''',
-            'component.md.jinja2': '''
-# {{name}} Component
-
-{{description}}
-
-## Props
-
-| Name | Type | Required | Default | Description |
-|------|------|----------|---------|-------------|
-{% for prop in props %}
-| {{prop.name}} | {{prop.type}} | {{prop.required}} | {{prop.default}} | {{prop.description}} |
-{% endfor %}
-
-{% if examples %}
-## Examples
-
-{% for example in examples %}
-### {{example.name}}
-
-{{example.description}}
-
-```tsx
-{{example.code}}
-```
-{% endfor %}
-{% endif %}
-
-{% if notes %}
-## Notes
-
-{% for note in notes %}
-- {{note}}
-{% endfor %}
-{% endif %}
-''',
-            'module.md.jinja2': '''
-# {{name}} Module
-
-{{description}}
-
-## Classes
-
-{% for class in classes %}
-### {{class.name}}
-
-{{class.description}}
-
-{% if class.methods %}
-#### Methods
-
-{% for method in class.methods %}
-##### `{{method.signature}}`
-
-{{method.description}}
-
-{% if method.params %}
-Parameters:
-{% for param in method.params %}
-- `{{param.name}}` ({{param.type}}): {{param.description}}
-{% endfor %}
-{% endif %}
-
-{% if method.returns %}
-Returns: {{method.returns}}
-{% endif %}
-
-{% if method.examples %}
-Examples:
-```python
-{{method.examples[0]}}
-```
-{% endif %}
-
-{% endfor %}
-{% endif %}
-{% endfor %}
-
-## Functions
-
-{% for function in functions %}
-### `{{function.signature}}`
-
-{{function.description}}
-
-{% if function.params %}
-Parameters:
-{% for param in function.params %}
-- `{{param.name}}` ({{param.type}}): {{param.description}}
-{% endfor %}
-{% endif %}
-
-{% if function.returns %}
-Returns: {{function.returns}}
-{% endif %}
-
-{% if function.examples %}
-Examples:
-```python
-{{function.examples[0]}}
-```
-{% endif %}
-
-{% endfor %}
-''',
-            'readme.md.jinja2': '''
-# {{project_name}}
-
-{{description}}
+{{ project.description }}
 
 ## Features
 
 {% for feature in features %}
-- {{feature}}
+- {{ feature }}
 {% endfor %}
-
-## Installation
-
-```bash
-{{installation}}
-```
-
-## Quick Start
-
-```{{language}}
-{{quickstart}}
-```
-
-## Documentation
-
-{{documentation}}
-
-## Contributing
-
-{{contributing}}
-
-## License
-
-{{license}}
-'''
-        }
-        
-        templates_dir = self.project_root / "templates" / "docs"
-        for name, content in templates.items():
-            template_file = templates_dir / name
-            if not template_file.exists():
-                template_file.write_text(content)
-                
-    async def generate_api_docs(self, api_info: Dict[str, Any]) -> Path:
-        """Generate API documentation"""
-        try:
-            template = self.template_env.get_template('api.md.jinja2')
-            output_file = self.output_dir / 'api' / f"{api_info['name']}.md"
-            output_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            content = template.render(**api_info)
-            output_file.write_text(content)
-            
-            logging.info(f"Generated API documentation: {output_file}")
-            return output_file
-            
-        except Exception as e:
-            logging.error(f"Error generating API documentation: {str(e)}")
-            raise
-            
-    async def generate_component_docs(self, component_info: Dict[str, Any]) -> Path:
-        """Generate component documentation"""
-        try:
-            template = self.template_env.get_template('component.md.jinja2')
-            output_file = self.output_dir / 'components' / f"{component_info['name']}.md"
-            output_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            content = template.render(**component_info)
-            output_file.write_text(content)
-            
-            logging.info(f"Generated component documentation: {output_file}")
-            return output_file
-            
-        except Exception as e:
-            logging.error(f"Error generating component documentation: {str(e)}")
-            raise
-            
-    async def generate_module_docs(self, module_path: Union[str, Path]) -> Optional[Path]:
-        """Generate documentation for a Python module"""
-        try:
-            module_path = Path(module_path)
-            if not module_path.exists():
-                raise FileNotFoundError(f"Module not found: {module_path}")
-                
-            # Parse module
-            with open(module_path, 'r') as f:
-                module_content = f.read()
-                
-            module_info = self._parse_module(module_content)
-            
-            # Generate documentation
-            template = self.template_env.get_template('module.md.jinja2')
-            output_file = self.output_dir / 'modules' / f"{module_path.stem}.md"
-            output_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            content = template.render(**module_info)
-            output_file.write_text(content)
-            
-            logging.info(f"Generated module documentation: {output_file}")
-            return output_file
-            
-        except Exception as e:
-            logging.error(f"Error generating module documentation: {str(e)}")
-            return None
-            
-    async def generate_project_docs(self, project_info: Dict[str, Any]) -> Path:
-        """Generate project-level documentation"""
-        try:
-            template = self.template_env.get_template('readme.md.jinja2')
-            output_file = self.output_dir / 'README.md'
-            
-            content = template.render(**project_info)
-            output_file.write_text(content)
-            
-            logging.info(f"Generated project documentation: {output_file}")
-            return output_file
-            
-        except Exception as e:
-            logging.error(f"Error generating project documentation: {str(e)}")
-            raise
-            
-    def _parse_module(self, content: str) -> Dict[str, Any]:
-        """Parse Python module content"""
-        try:
-            tree = ast.parse(content)
-            
-            module_info = {
-                'name': '',
-                'description': self._extract_docstring(tree),
-                'classes': [],
-                'functions': []
-            }
-            
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef):
-                    class_info = self._parse_class(node)
-                    module_info['classes'].append(class_info)
-                elif isinstance(node, ast.FunctionDef):
-                    if not node.name.startswith('_'):  # Skip private functions
-                        function_info = self._parse_function(node)
-                        module_info['functions'].append(function_info)
-                        
-            return module_info
-            
-        except Exception as e:
-            logging.error(f"Error parsing module: {str(e)}")
-            return {}
-            
-    def _parse_class(self, node: ast.ClassDef) -> Dict[str, Any]:
-        """Parse class definition"""
-        class_info = {
-            'name': node.name,
-            'description': self._extract_docstring(node),
-            'methods': []
-        }
-        
-        for item in node.body:
-            if isinstance(item, ast.FunctionDef):
-                if not item.name.startswith('_'):  # Skip private methods
-                    method_info = self._parse_function(item)
-                    class_info['methods'].append(method_info)
-                    
-        return class_info
-        
-    def _parse_function(self, node: ast.FunctionDef) -> Dict[str, Any]:
-        """Parse function definition"""
-        docstring = self._extract_docstring(node)
-        params = self._parse_params(node)
-        returns = self._parse_returns(docstring)
-        examples = self._parse_examples(docstring)
-        
-        return {
-            'name': node.name,
-            'signature': self._get_function_signature(node),
-            'description': docstring,
-            'params': params,
-            'returns': returns,
-            'examples': examples
-        }
-        
-    def _extract_docstring(self, node: Union[ast.Module, ast.ClassDef, ast.FunctionDef]) -> str:
-        """Extract docstring from AST node"""
-        docstring = ast.get_docstring(node)
-        return docstring if docstring else ""
-        
-    def _parse_params(self, node: ast.FunctionDef) -> List[Dict[str, str]]:
-        """Parse function parameters"""
-        params = []
-        for arg in node.args.args:
-            if arg.arg != 'self':
-                param_info = {
-                    'name': arg.arg,
-                    'type': self._get_annotation_name(arg.annotation),
-                    'description': ''  # Could be extracted from docstring
-                }
-                params.append(param_info)
-        return params
-        
-    def _get_annotation_name(self, annotation: Optional[ast.AST]) -> str:
-        """Get type annotation name"""
-        if annotation is None:
-            return 'Any'
-        return ast.unparse(annotation)
-        
-    def _parse_returns(self, docstring: str) -> Optional[str]:
-        """Parse return type from docstring"""
-        if 'Returns:' in docstring:
-            return docstring.split('Returns:')[1].strip().split('\n')[0]
-        return None
-        
-    def _parse_examples(self, docstring: str) -> List[str]:
-        """Parse examples from docstring"""
-        examples = []
-        if 'Examples:' in docstring:
-            example_section = docstring.split('Examples:')[1].strip()
-            # Extract code blocks
-            code_blocks = re.findall(r'```.*?\n(.*?)```', example_section, re.DOTALL)
-            examples.extend(code_blocks)
-        return examples
-        
-    def _get_function_signature(self, node: ast.FunctionDef) -> str:
-        """Get function signature"""
-        args = []
-        for arg in node.args.args:
-            if arg.arg != 'self':
-                annotation = self._get_annotation_name(arg.annotation)
-                args.append(f"{arg.arg}: {annotation}")
-        return f"{node.name}({', '.join(args)})" 
-
-    async def generate_project_documentation(self, config: ProjectConfig) -> None:
-        """Generate complete project documentation"""
-        project_dir = Path(config.name)
-        
-        # Generate README
-        await self._generate_readme(project_dir, config)
-        
-        # Generate component documentation
-        if project_dir.joinpath("src/components").exists():
-            await self._generate_component_docs(project_dir)
-            
-        # Generate API documentation if needed
-        if "API" in config.features:
-            await self._generate_api_docs(project_dir)
-            
-        # Generate setup documentation
-        await self._generate_setup_docs(project_dir, config)
-
-    async def update_documentation(self) -> None:
-        """Update existing documentation"""
-        # Implementation for updating docs
-        pass
-
-    async def _generate_readme(self, project_dir: Path, config: ProjectConfig) -> None:
-        """Generate project README.md"""
-        readme_content = f"""# {config.name}
-
-{config.description}
-
-## Features
-
-{self._format_features(config.features)}
 
 ## Getting Started
 
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Start the development server:
-   ```bash
-   npm run dev
-   ```
+{% for step in setup_steps %}
+{{ loop.index }}. {{ step }}
+{% endfor %}
 
-## Available Scripts
+## Documentation
 
-- `npm run dev` - Start development server
-- `npm run build` - Build for production
-- `npm start` - Start production server
-- `npm run lint` - Run ESLint
-- `npm run format` - Format code with Prettier
+For more detailed documentation, please see the [docs](./docs) directory.
+""",
+            "api.md.j2": """# API Documentation
+
+{% for endpoint in endpoints %}
+## {{ endpoint.name }}
+
+{{ endpoint.description }}
+
+**Method:** {{ endpoint.method }}
+**Path:** {{ endpoint.path }}
+
+{% if endpoint.parameters %}
+### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+{% for param in endpoint.parameters %}
+| {{ param.name }} | {{ param.type }} | {{ param.required }} | {{ param.description }} |
+{% endfor %}
+{% endif %}
+
+{% if endpoint.responses %}
+### Responses
+
+{% for response in endpoint.responses %}
+#### {{ response.code }}
+
+{{ response.description }}
+
+{% if response.example %}
+```json
+{{ response.example }}
+```
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+""",
+            "components.md.j2": """# Components
+
+{% for component in components %}
+## {{ component.name }}
+
+{{ component.description }}
+
+{% if component.props %}
+### Props
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+{% for prop in component.props %}
+| {{ prop.name }} | {{ prop.type }} | {{ prop.required }} | {{ prop.default }} | {{ prop.description }} |
+{% endfor %}
+{% endif %}
+
+{% if component.example %}
+### Example
+
+```tsx
+{{ component.example }}
+```
+{% endif %}
+
+{% endfor %}
 """
+        }
         
-        if "Testing" in config.features:
-            readme_content += "- `npm test` - Run tests\n"
+        for name, content in templates.items():
+            template_path = template_dir / name
+            template_path.write_text(content)
+
+    async def generate_project_documentation(self, config: ProjectConfig, project_path: Path) -> None:
+        """Generate complete project documentation"""
+        if not project_path.exists():
+            raise ValueError(f"Project directory {project_path} does not exist")
             
-        project_dir.joinpath("README.md").write_text(readme_content)
-
-    async def _generate_component_docs(self, project_dir: Path) -> None:
-        """Generate documentation for components"""
-        docs_dir = project_dir.joinpath("docs/components")
-        docs_dir.mkdir(parents=True, exist_ok=True)
+        docs_dir = project_path / "docs"
+        docs_dir.mkdir(exist_ok=True)
         
-        # Implementation for component documentation
-        pass
+        try:
+            # Analyze project
+            patterns = await self.pattern_analyzer.analyze_patterns(project_path)
+            requirements = await self.requirement_analyzer.analyze_project_requirements(config, project_path)
+            
+            # Generate documentation files
+            await asyncio.gather(
+                self._generate_readme(project_path, config, patterns, requirements),
+                self._generate_api_docs(docs_dir, patterns.get("components", [])),
+                self._generate_component_docs(docs_dir, patterns.get("components", [])),
+                self._generate_architecture_docs(docs_dir, patterns, requirements),
+                self._generate_setup_docs(docs_dir, config, requirements)
+            )
+        except Exception as e:
+            raise Exception(f"Failed to generate documentation: {str(e)}")
 
-    async def _generate_api_docs(self, project_dir: Path) -> None:
+    async def update_documentation(self, project_dir: Path) -> None:
+        """Update existing documentation"""
+        if not project_dir.exists():
+            raise ValueError(f"Project directory {project_dir} does not exist")
+            
+        docs_dir = project_dir / "docs"
+        if not docs_dir.exists():
+            raise FileNotFoundError("Documentation directory not found")
+            
+        try:
+            # Re-analyze project
+            patterns = await self.pattern_analyzer.analyze_patterns(project_dir)
+            
+            # Update documentation files
+            await asyncio.gather(
+                self._update_api_docs(docs_dir, patterns.get("components", [])),
+                self._update_component_docs(docs_dir, patterns.get("components", [])),
+                self._update_architecture_docs(docs_dir, patterns)
+            )
+        except Exception as e:
+            raise Exception(f"Failed to update documentation: {str(e)}")
+
+    async def _generate_readme(
+        self, 
+        project_dir: Path, 
+        config: ProjectConfig, 
+        patterns: Dict, 
+        requirements: Dict
+    ) -> None:
+        """Generate project README"""
+        try:
+            template = self.template_env.get_template("readme.md.j2")
+            
+            content = template.render(
+                project=config,  # Pass the entire config object
+                features=config.features,
+                setup_steps=self._get_setup_steps(config, requirements),
+                usage_examples=self._get_usage_examples(patterns),
+                component_list=self._get_component_list(patterns),
+                dependencies=requirements.get("dependencies", {}),
+                dev_dependencies=requirements.get("devDependencies", {})
+            )
+            
+            readme_file = project_dir / "README.md"
+            readme_file.write_text(content)
+        except Exception as e:
+            raise Exception(f"Failed to generate README: {str(e)}")
+
+    async def _generate_api_docs(self, docs_dir: Path, components: List[Dict]) -> None:
         """Generate API documentation"""
-        api_docs_dir = project_dir.joinpath("docs/api")
-        api_docs_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Implementation for API documentation
-        pass
+        try:
+            api_dir = docs_dir / "api"
+            api_dir.mkdir(exist_ok=True)
+            
+            template = self.template_env.get_template("api.md.j2")
+            
+            for component in components:
+                if component.get("type") == "api":
+                    content = template.render(
+                        component_name=component["name"],
+                        endpoints=self._extract_endpoints(component),
+                        params=self._extract_params(component),
+                        responses=self._extract_responses(component)
+                    )
+                    
+                    doc_file = api_dir / f"{component['name'].lower()}.md"
+                    doc_file.write_text(content)
+        except Exception as e:
+            raise Exception(f"Failed to generate API documentation: {str(e)}")
 
-    async def _generate_setup_docs(self, project_dir: Path, config: ProjectConfig) -> None:
+    async def _generate_component_docs(self, docs_dir: Path, components: List[Dict]) -> None:
+        """Generate component documentation"""
+        try:
+            components_dir = docs_dir / "components"
+            components_dir.mkdir(exist_ok=True)
+            
+            template = self.template_env.get_template("components.md.j2")
+            
+            for component in components:
+                try:
+                    content = template.render(
+                        component_name=component["name"],
+                        description=self._get_component_description(component),
+                        props=self._extract_props(component),
+                        examples=self._get_component_examples(component),
+                        dependencies=component.get("dependencies", []),
+                        patterns=component.get("patterns", [])
+                    )
+                    
+                    doc_file = components_dir / f"{component['name'].lower()}.md"
+                    doc_file.write_text(content)
+                except Exception as e:
+                    logging.error(f"Failed to generate documentation for component {component['name']}: {str(e)}")
+                    continue
+        except Exception as e:
+            raise Exception(f"Failed to generate component documentation: {str(e)}")
+
+    async def _generate_architecture_docs(
+        self, 
+        docs_dir: Path, 
+        patterns: Dict,
+        requirements: Dict
+    ) -> None:
+        """Generate architecture documentation"""
+        template = self.template_env.get_template("architecture.md.j2")
+        
+        content = template.render(
+            patterns=patterns,
+            requirements=requirements,
+            component_structure=self._get_component_structure(patterns),
+            data_flow=self._get_data_flow(patterns),
+            state_management=self._get_state_management(patterns)
+        )
+        
+        arch_file = docs_dir / "architecture.md"
+        arch_file.write_text(content)
+
+    async def _generate_setup_docs(
+        self, 
+        docs_dir: Path, 
+        config: ProjectConfig,
+        requirements: Dict
+    ) -> None:
         """Generate setup documentation"""
-        setup_docs_dir = project_dir.joinpath("docs/setup")
-        setup_docs_dir.mkdir(parents=True, exist_ok=True)
+        template = self.template_env.get_template("setup.md.j2")
         
-        # Implementation for setup documentation
-        pass
+        content = template.render(
+            project_name=config.name,
+            framework=config.framework,
+            dependencies=requirements.get("dependencies", {}),
+            dev_dependencies=requirements.get("devDependencies", {}),
+            scripts=requirements.get("scripts", {}),
+            env_vars=self._get_required_env_vars(requirements),
+            setup_steps=self._get_setup_steps(config, requirements)
+        )
+        
+        setup_file = docs_dir / "setup.md"
+        setup_file.write_text(content)
 
-    def _format_features(self, features: List[str]) -> str:
-        """Format feature list for markdown"""
-        return "\n".join([f"- {feature}" for feature in features]) 
+    def _get_setup_steps(self, config: ProjectConfig, requirements: Dict) -> List[str]:
+        """Get project setup steps"""
+        steps = [
+            f"1. Clone the repository: `git clone <repository-url>`",
+            f"2. Install dependencies: `npm install`"
+        ]
+        
+        # Add framework-specific steps
+        if config.framework == "Next.js":
+            steps.append("3. Run the development server: `npm run dev`")
+        elif config.framework == "React":
+            steps.append("3. Start the development server: `npm start`")
+        elif config.framework == "Vue":
+            steps.append("3. Run the development server: `npm run serve`")
+        elif config.framework == "Angular":
+            steps.append("3. Start the development server: `ng serve`")
+            
+        # Add feature-specific steps
+        if "Database" in config.features:
+            steps.extend([
+                "4. Set up the database:",
+                "   - Copy `.env.example` to `.env`",
+                "   - Update database credentials in `.env`",
+                "   - Run migrations: `npm run db:migrate`"
+            ])
+            
+        if "Testing" in config.features:
+            steps.append("5. Run tests: `npm test`")
+            
+        return steps
+
+    def _get_usage_examples(self, patterns: Dict) -> List[Dict[str, str]]:
+        """Get component usage examples"""
+        examples = []
+        
+        for component in patterns.get("components", []):
+            if component.get("examples"):
+                examples.append({
+                    "name": component["name"],
+                    "code": component["examples"][0]  # Get first example
+                })
+                
+        return examples
+
+    def _get_component_list(self, patterns: Dict) -> List[Dict[str, str]]:
+        """Get list of components with descriptions"""
+        return [{
+            "name": component["name"],
+            "description": self._get_component_description(component)
+        } for component in patterns.get("components", [])]
+
+    def _get_component_description(self, component: Dict) -> str:
+        """Generate component description"""
+        try:
+            description = f"A {component.get('type', 'component')} component"
+            
+            if component.get("patterns"):
+                patterns = ", ".join(component["patterns"])
+                description += f" implementing {patterns} patterns"
+                
+            if component.get("dependencies"):
+                deps = ", ".join(component["dependencies"])
+                description += f". Depends on: {deps}"
+                
+            return description
+        except Exception as e:
+            logging.warning(f"Failed to generate component description: {str(e)}")
+            return "A component"  # Fallback description
+
+    def _extract_props(self, component: Dict) -> List[Dict]:
+        """Extract component props"""
+        props = []
+        
+        if "attributes" in component:
+            for name, details in component["attributes"].items():
+                props.append({
+                    "name": name,
+                    "type": details.get("type", "any"),
+                    "required": details.get("required", False),
+                    "description": details.get("description", ""),
+                    "default": details.get("default")
+                })
+                
+        return props
+
+    def _get_component_examples(self, component: Dict) -> List[str]:
+        """Get component usage examples"""
+        return component.get("examples", [])
+
+    def _get_component_structure(self, patterns: Dict) -> Dict:
+        """Get component hierarchy and relationships"""
+        structure = {}
+        
+        for component in patterns.get("components", []):
+            structure[component["name"]] = {
+                "children": component.get("children", []),
+                "parents": component.get("parents", []),
+                "dependencies": component.get("dependencies", [])
+            }
+            
+        return structure
+
+    def _get_data_flow(self, patterns: Dict) -> List[Dict]:
+        """Get data flow between components"""
+        flows = []
+        
+        for component in patterns.get("components", []):
+            if "dataFlow" in component:
+                flows.extend(component["dataFlow"])
+                
+        return flows
+
+    def _get_state_management(self, patterns: Dict) -> Dict:
+        """Get state management patterns"""
+        state_patterns = {}
+        
+        for component in patterns.get("components", []):
+            if "state" in component:
+                state_patterns[component["name"]] = component["state"]
+                
+        return state_patterns
+
+    def _get_required_env_vars(self, requirements: Dict) -> List[Dict]:
+        """Get required environment variables"""
+        env_vars = []
+        
+        if "configurations" in requirements:
+            for config in requirements["configurations"]:
+                if config.get("type") == "env":
+                    env_vars.append({
+                        "name": config["name"],
+                        "description": config.get("description", ""),
+                        "required": config.get("required", True),
+                        "default": config.get("default")
+                    })
+                    
+        return env_vars
+
+    def _extract_endpoints(self, component: Dict) -> List[Dict]:
+        """Extract API endpoints from component"""
+        endpoints = []
+        
+        if "api" in component:
+            for endpoint in component["api"]:
+                endpoints.append({
+                    "path": endpoint["path"],
+                    "method": endpoint["method"],
+                    "description": endpoint.get("description", ""),
+                    "auth": endpoint.get("auth", False)
+                })
+                
+        return endpoints
+
+    def _extract_params(self, component: Dict) -> Dict[str, List[Dict]]:
+        """Extract API parameters from component"""
+        params = {
+            "query": [],
+            "path": [],
+            "body": []
+        }
+        
+        if "api" in component:
+            for endpoint in component["api"]:
+                if "params" in endpoint:
+                    for param_type, param_list in endpoint["params"].items():
+                        params[param_type].extend(param_list)
+                        
+        return params
+
+    def _extract_responses(self, component: Dict) -> Dict[str, Dict]:
+        """Extract API responses from component"""
+        responses = {}
+        
+        if "api" in component:
+            for endpoint in component["api"]:
+                if "responses" in endpoint:
+                    for status, response in endpoint["responses"].items():
+                        responses[status] = response
+                        
+        return responses 

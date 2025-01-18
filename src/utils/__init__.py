@@ -1,9 +1,22 @@
+from .types import (
+    AgentStatus,
+    ComponentInfo,
+    Pattern,
+    StylePattern,
+    LayoutPattern,
+    LayoutType
+)
+from .project_config import ProjectConfig
 from .constants import *
-from .types import *
-from .project_structure import ProjectStructureScanner
 from .system_checker import SystemChecker
 
 __all__ = [
-    'ProjectStructureScanner',
+    'AgentStatus',
+    'ProjectConfig',
+    'ComponentInfo',
+    'Pattern',
+    'StylePattern',
+    'LayoutPattern',
+    'LayoutType',
     'SystemChecker'
 ] 

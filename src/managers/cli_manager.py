@@ -3,12 +3,16 @@ import questionary
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from src.agents.meta_agent import MetaAgent
 from src.utils.types import ProjectConfig
 
 class CLIManager:
     def __init__(self):
         self.console = Console()
+        self._initialize_agent()
+
+    def _initialize_agent(self):
+        # Lazy import to avoid circular dependency
+        from src.agents.meta_agent import MetaAgent
         self.agent = MetaAgent()
 
     async def start(self):
