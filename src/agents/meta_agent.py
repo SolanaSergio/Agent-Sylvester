@@ -1,283 +1,257 @@
-from typing import Dict, List, Optional
-from pathlib import Path
 import asyncio
-import json
-import re
-import logging
-from datetime import datetime
-
-from ..analyzers.requirement_analyzer import RequirementAnalyzer
-from ..analyzers.pattern_analyzer import PatternAnalyzer
-from ..scrapers.web_scraper import WebScraper
-from ..scrapers.component_scraper import ComponentScraper
-from ..builders.project_builder import ProjectBuilder
-from ..builders.component_builder import ComponentBuilder
-from ..utils.types import AgentStatus, ComponentInfo
-from ..utils.project_structure import ProjectStructure
-from ..managers.ui_manager import UIManager
-from ..managers.config_manager import ConfigManager
-from ..managers.dependency_manager import DependencyManager
-from ..managers.api_manager import APIManager
-from ..managers.db_manager import DatabaseManager
-from .progress_tracker import ProgressTracker
-from ..utils.system_checker import SystemChecker
-from ..managers.template_manager import TemplateManager
-from ..managers.tool_manager import ToolManager
+from pathlib import Path
+from typing import List, Optional
+from src.utils.types import ProjectConfig, ProjectStatus, ComponentStatus, DependencyInfo
+from src.managers.dependency_manager import DependencyManager
+from src.generators.documentation_generator import DocumentationGenerator
+from src.analyzers.requirement_analyzer import RequirementAnalyzer
+from src.analyzers.pattern_analyzer import PatternAnalyzer
+from src.builders.project_builder import ProjectBuilder
+from src.agents.progress_tracker import ProgressTracker
+from src.scrapers.web_scraper import WebScraper
 
 class MetaAgent:
-    """Core agent that orchestrates website analysis and building."""
-    
-    def __init__(self, goal: str):
-        self.goal = goal
-        self.progress = ProgressTracker()
-        self.ui = UIManager()
-        self.project_structure = ProjectStructure(".")
-        
-        # State management
-        self.state = {
-            'initialized': False,
-            'current_task': None,
-            'requirements': None,
-            'components': [],
-            'errors': [],
-            'warnings': []
-        }
-        
-        # Initialize analyzers
+    def __init__(self):
+        self.dependency_manager = DependencyManager()
+        self.documentation_generator = DocumentationGenerator()
         self.requirement_analyzer = RequirementAnalyzer()
         self.pattern_analyzer = PatternAnalyzer()
-        
-        # Initialize scrapers
+        self.project_builder = ProjectBuilder()
+        self.progress_tracker = ProgressTracker()
         self.web_scraper = WebScraper()
-        self.component_scraper = ComponentScraper()
+        self.current_project: Optional[ProjectConfig] = None
+        self.project_path: Optional[Path] = None
+
+    async def initialize_project(self, config: ProjectConfig) -> None:
+        """Initialize a new project with the given configuration"""
+        self.current_project = config
+        self.project_path = Path(config.name)
         
-        # Initialize builders with workspace
-        self.project_builder = ProjectBuilder("./projects")
-        self.component_builder = ComponentBuilder("./components")
+        # Analyze requirements based on config
+        requirements = await self.requirement_analyzer.analyze_project_requirements(config)
         
-        # System checks
-        self.system_checker = SystemChecker()
+        # Initialize project structure
+        await self.project_builder.initialize_project(config, requirements)
         
-        # Initialize managers (will be fully setup during project creation)
-        self.config_manager = None
-        self.dependency_manager = None
-        self.api_manager = None
-        self.db_manager = None
-        self.template_manager = None
-        self.tool_manager = None
+        # Set up dependencies
+        await self.dependency_manager.setup_project_dependencies(config)
         
-    async def initialize(self):
-        """Initialize the agent and perform system checks"""
+        # Generate project structure
+        await self.project_builder.generate_structure()
+        
+        # Generate initial components
+        await self.project_builder.generate_components()
+        
+        # Generate documentation
+        await self.documentation_generator.generate_project_documentation(config)
+        
+        self.progress_tracker.update_status("Project initialized")
+
+    async def import_project(self, project_path: str) -> None:
+        """Import and analyze an existing project"""
+        self.project_path = Path(project_path)
+        if not self.project_path.exists():
+            raise FileNotFoundError(f"Project path does not exist: {project_path}")
+        
+        # Analyze project structure
+        structure = await self.pattern_analyzer.analyze_project_structure(self.project_path)
+        
+        # Analyze patterns
+        patterns = await self.pattern_analyzer.analyze_patterns()
+        
+        # Extract project configuration
+        config = await self._extract_project_config()
+        self.current_project = config
+        
+        # Analyze requirements
+        requirements = await self.requirement_analyzer.analyze_project_requirements(config)
+        
+        # Update project status
+        self.progress_tracker.update_status("Project imported")
+
+    async def update_project(self) -> None:
+        """Update the current project"""
+        if not self.current_project or not self.project_path:
+            raise ValueError("No project is currently active")
+        
+        # Analyze current state
+        current_state = await self.requirement_analyzer.analyze_current_state()
+        
+        # Update dependencies
+        await self.dependency_manager.update_dependencies()
+        
+        # Update components
+        await self.project_builder.update_components()
+        
+        # Update documentation
+        await self.documentation_generator.update_documentation()
+        
+        self.progress_tracker.update_status("Project updated")
+
+    async def _extract_project_config(self) -> ProjectConfig:
+        """Extract configuration from existing project"""
         try:
-            # Check system requirements
-            await self.system_checker.check_requirements()
-            
-            # Create necessary directories
-            self.project_structure.create_base_structure()
-            
-            # Initialize managers
-            self.config_manager = ConfigManager(self.project_structure.root)
-            self.dependency_manager = DependencyManager(self.project_structure.root)
-            self.api_manager = APIManager(self.project_structure.root)
-            self.db_manager = DatabaseManager(self.project_structure.root)
-            self.template_manager = TemplateManager(self.project_structure.root)
-            self.tool_manager = ToolManager(self.project_structure.root)
-            
-            self.state['initialized'] = True
-            logging.info("Agent initialized successfully")
-            
-        except Exception as e:
-            logging.error(f"Failed to initialize agent: {str(e)}")
-            self.state['errors'].append(str(e))
-            raise
-            
-    async def process_user_input(self, user_input: str):
-        """Process user input and orchestrate the response"""
-        try:
-            self.state['current_task'] = 'analyzing_requirements'
-            
-            # Analyze requirements
-            requirements = self.requirement_analyzer.analyze_requirements(user_input)
-            self.state['requirements'] = requirements
-            
-            # Validate and enhance requirements
-            self._validate_requirements(requirements)
-            
-            # Setup project structure
-            await self._setup_project(requirements)
-            
-            # Generate components
-            await self._generate_components(requirements)
-            
-            # Setup infrastructure
-            await self._setup_infrastructure(requirements)
-            
-            # Final checks and cleanup
-            await self._perform_final_checks()
-            
-        except Exception as e:
-            logging.error(f"Error processing user input: {str(e)}")
-            self.state['errors'].append(str(e))
-            raise
-            
-    async def _setup_project(self, requirements: Dict):
-        """Setup the project based on requirements"""
-        self.state['current_task'] = 'setting_up_project'
-        
-        try:
-            # Initialize project structure
-            await self.project_builder.create_project(requirements)
-            
-            # Setup configuration
-            self.config_manager.setup_project_config(requirements)
-            
-            # Setup dependencies
-            await self.dependency_manager.setup_dependencies(requirements)
-            
-            # Setup version control
-            await self.project_builder.setup_version_control()
-            
-        except Exception as e:
-            logging.error(f"Project setup failed: {str(e)}")
-            self.state['errors'].append(str(e))
-            raise
-            
-    async def _generate_components(self, requirements: Dict):
-        """Generate required components"""
-        self.state['current_task'] = 'generating_components'
-        
-        try:
-            # Extract components from requirements
-            components = requirements.get('components', [])
-            
-            # Generate each component
-            for component in components:
-                try:
-                    component_info = await self.component_builder.create_component(component, requirements)
-                    self.state['components'].append(component_info)
-                except Exception as e:
-                    logging.warning(f"Failed to generate component {component}: {str(e)}")
-                    self.state['warnings'].append(f"Component generation warning: {str(e)}")
+            # Try to read package.json
+            package_json = self.project_path / "package.json"
+            if package_json.exists():
+                import json
+                with open(package_json) as f:
+                    data = json.load(f)
                     
+                # Determine framework from dependencies
+                framework = "Next.js" if "next" in data.get("dependencies", {}) else "React"
+                if "vue" in data.get("dependencies", {}):
+                    framework = "Vue"
+                elif "@angular/core" in data.get("dependencies", {}):
+                    framework = "Angular"
+                
+                return ProjectConfig(
+                    name=data.get("name", self.project_path.name),
+                    description=data.get("description", ""),
+                    framework=framework,
+                    features=[]  # Will be determined by analysis
+                )
+            else:
+                # Fallback to directory name and basic config
+                return ProjectConfig(
+                    name=self.project_path.name,
+                    description="",
+                    framework="React",  # Default to React
+                    features=[]
+                )
         except Exception as e:
-            logging.error(f"Component generation failed: {str(e)}")
-            self.state['errors'].append(str(e))
-            raise
+            raise Exception(f"Failed to extract project configuration: {str(e)}")
+
+    async def generate_project_structure(self) -> None:
+        """Generate the project's directory structure and base files"""
+        if not self.current_project:
+            raise ValueError("No project initialized")
             
-    async def _setup_infrastructure(self, requirements: Dict):
-        """Setup project infrastructure"""
-        self.state['current_task'] = 'setting_up_infrastructure'
-        
-        try:
-            # Setup API layer if needed
-            if 'api' in requirements.get('features', []):
-                await self.api_manager.setup_api_layer(requirements)
-                
-            # Setup database if needed
-            if 'database' in requirements.get('features', []):
-                await self.db_manager.setup_database(requirements)
-                
-            # Setup authentication if needed
-            if 'authentication' in requirements.get('features', []):
-                await self._setup_authentication(requirements)
-                
-        except Exception as e:
-            logging.error(f"Infrastructure setup failed: {str(e)}")
-            self.state['errors'].append(str(e))
-            raise
+        await self.project_builder.generate_structure()
+        self.progress_tracker.update_status("Project structure generated")
+
+    async def setup_dependencies(self) -> None:
+        """Set up project dependencies based on requirements"""
+        if not self.current_project:
+            raise ValueError("No project initialized")
             
-    def _validate_requirements(self, requirements: Dict):
-        """Validate and enhance requirements"""
-        # Check for conflicting requirements
-        if 'static-site' in requirements['project_type'] and 'real-time' in requirements.get('features', []):
-            self.state['warnings'].append("Static sites may not fully support real-time features")
+        await self.dependency_manager.setup_project_dependencies(self.current_project)
+        self.progress_tracker.update_status("Dependencies set up")
+
+    async def generate_components(self) -> None:
+        """Generate initial project components"""
+        if not self.current_project:
+            raise ValueError("No project initialized")
             
-        # Ensure necessary security features
-        if 'payments' in requirements.get('features', []):
-            if 'authentication' not in requirements.get('features', []):
-                requirements['features'].append('authentication')
-                self.state['warnings'].append("Added authentication requirement for payment features")
-                
-        # Validate technical requirements
-        if requirements.get('ai_integration', {}).get('openai') and 'API_KEY' not in requirements.get('deployment', {}):
-            self.state['warnings'].append("OpenAI integration requires API key configuration")
-            
-    async def _setup_authentication(self, requirements: Dict):
-        """Setup authentication system"""
-        auth_type = requirements.get('security', {}).get('authentication_type', 'jwt')
-        
-        if auth_type == 'jwt':
-            await self._setup_jwt_auth()
-        elif auth_type == 'oauth':
-            await self._setup_oauth()
-        else:
-            await self._setup_default_auth()
-            
-    async def _perform_final_checks(self):
-        """Perform final checks and validations"""
-        try:
-            # Check for security vulnerabilities
-            security_issues = await self.system_checker.check_security()
-            if security_issues:
-                self.state['warnings'].extend(security_issues)
-                
-            # Check for performance issues
-            performance_issues = await self.system_checker.check_performance()
-            if performance_issues:
-                self.state['warnings'].extend(performance_issues)
-                
-            # Validate project structure
-            structure_issues = self.project_structure.validate()
-            if structure_issues:
-                self.state['warnings'].extend(structure_issues)
-                
-        except Exception as e:
-            logging.error(f"Final checks failed: {str(e)}")
-            self.state['errors'].append(str(e))
-            
-    async def cleanup(self):
-        """Cleanup resources and perform final tasks"""
-        try:
-            # Cleanup temporary files
-            await self.project_builder.cleanup()
-            
-            # Save project state
-            self._save_state()
-            
-            # Generate documentation
-            await self._generate_documentation()
-            
-        except Exception as e:
-            logging.error(f"Cleanup failed: {str(e)}")
-            self.state['errors'].append(str(e))
-            
-    def _save_state(self):
-        """Save the current state for recovery"""
-        try:
-            state_file = self.project_structure.root / ".agent-state.json"
-            with open(state_file, 'w') as f:
-                json.dump(self.state, f, indent=2)
-        except Exception as e:
-            logging.error(f"Failed to save state: {str(e)}")
-            
-    async def _generate_documentation(self):
+        await self.project_builder.generate_components()
+        self.progress_tracker.update_status("Components generated")
+
+    async def generate_documentation(self) -> None:
         """Generate project documentation"""
-        try:
-            docs_dir = self.project_structure.root / "docs"
-            docs_dir.mkdir(exist_ok=True)
+        if not self.current_project:
+            raise ValueError("No project initialized")
             
-            # Generate README
-            readme_content = self.template_manager.generate_readme(
-                self.state['requirements'],
-                self.state['components']
-            )
-            with open(self.project_structure.root / "README.md", 'w') as f:
-                f.write(readme_content)
+        await self.documentation_generator.generate_project_documentation(self.current_project)
+        self.progress_tracker.update_status("Documentation generated")
+
+    async def analyze_project(self) -> ProjectStatus:
+        """Analyze current project status"""
+        if not self.current_project:
+            raise ValueError("No project initialized")
+            
+        patterns = await self.pattern_analyzer.analyze_patterns()
+        requirements = await self.requirement_analyzer.analyze_current_state()
+        
+        return ProjectStatus(
+            components=await self._get_component_status(),
+            dependencies=await self._get_dependency_status(),
+            issues=await self._get_project_issues()
+        )
+
+    async def update_components(self) -> None:
+        """Update project components based on current state"""
+        if not self.current_project:
+            raise ValueError("No project initialized")
+            
+        await self.project_builder.update_components()
+        self.progress_tracker.update_status("Components updated")
+
+    async def update_dependencies(self) -> None:
+        """Update project dependencies"""
+        if not self.current_project:
+            raise ValueError("No project initialized")
+            
+        await self.dependency_manager.update_dependencies()
+        self.progress_tracker.update_status("Dependencies updated")
+
+    async def update_documentation(self) -> None:
+        """Update project documentation"""
+        if not self.current_project:
+            raise ValueError("No project initialized")
+            
+        await self.documentation_generator.update_documentation()
+        self.progress_tracker.update_status("Documentation updated")
+
+    async def get_project_status(self) -> ProjectStatus:
+        """Get detailed project status"""
+        if not self.current_project:
+            raise ValueError("No project initialized")
+            
+        return ProjectStatus(
+            components=await self._get_component_status(),
+            dependencies=await self._get_dependency_status(),
+            issues=await self._get_project_issues()
+        )
+
+    async def _get_component_status(self) -> List[ComponentStatus]:
+        """Get status of all project components"""
+        if not self.project_path:
+            return []
+            
+        components = []
+        components_dir = self.project_path / "src/components"
+        
+        if components_dir.exists():
+            for component_file in components_dir.glob("**/*.{tsx,jsx}"):
+                # Analyze component status
+                with open(component_file) as f:
+                    content = f.read()
+                    status = "Ready" if "export" in content else "Incomplete"
+                components.append(ComponentStatus(
+                    name=component_file.stem,
+                    status=status
+                ))
+        
+        return components
+
+    async def _get_dependency_status(self) -> List[DependencyInfo]:
+        """Get status of all project dependencies"""
+        return await self.dependency_manager.get_dependency_status()
+
+    async def _get_project_issues(self) -> List[str]:
+        """Get list of current project issues"""
+        if not self.project_path:
+            return []
+            
+        issues = []
+        
+        # Check for common issues
+        if not (self.project_path / "tsconfig.json").exists():
+            issues.append("Missing TypeScript configuration")
+        
+        if not (self.project_path / "package.json").exists():
+            issues.append("Missing package.json")
+            
+        if not (self.project_path / "src/components").exists():
+            issues.append("Missing components directory")
+            
+        if not (self.project_path / "tests").exists():
+            issues.append("Missing tests directory")
+            
+        # Check for empty directories
+        for dir_name in ["src", "public", "tests"]:
+            dir_path = self.project_path / dir_name
+            if dir_path.exists() and not any(dir_path.iterdir()):
+                issues.append(f"Empty {dir_name} directory")
                 
-            # Generate API documentation if needed
-            if 'api' in self.state['requirements'].get('features', []):
-                await self.api_manager.generate_documentation()
-                
-        except Exception as e:
-            logging.error(f"Documentation generation failed: {str(e)}")
-            self.state['errors'].append(str(e)) 
+        return issues 

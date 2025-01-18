@@ -5,7 +5,6 @@ import logging
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 import asyncio
 
@@ -22,53 +21,27 @@ class CLIManager:
         self.ui = UIManager()
         self.agent: Optional[MetaAgent] = None
         self.main_menu_items = {
-            "🚀 Initialize New Project": self.handle_init,
-            "🔍 Analyze Code": lambda: self.handle_analysis_menu(),
-            "⚡ Generate Code": lambda: self.handle_generation_menu(),
-            "🛠️ Build & Deploy": lambda: self.handle_build_menu(),
-            "📝 Documentation": lambda: self.handle_docs_menu(),
-            "📊 View Status": self.display_agent_status,
-            "❓ Help": self.display_help,
+            "🆕 New Project": self.handle_new_project,
+            "🔨 Build/Update Project": self.handle_build_project,
+            "📊 Project Status": self.display_agent_status,
             "👋 Exit": lambda: False
         }
         
     def display_welcome(self):
-        """Display welcome message and agent status"""
+        """Display welcome message"""
         console.print(Panel.fit(
             "[bold blue]Welcome to Auto Agent[/bold blue]\n"
-            "Your AI-powered development assistant\n"
-            "[dim]Select an option from the menu below[/dim]",
+            "Your AI-powered development assistant",
             border_style="blue",
-            title="🤖 Auto Agent",
-            subtitle="v1.0.0"
+            title="🤖 Auto Agent"
         ))
         
-    def display_help(self):
-        """Display help information"""
-        help_text = """
-[bold blue]🤖 Auto Agent Help[/bold blue]
-
-[bold]Main Features:[/bold]
-• Project Initialization - Create new projects with various frameworks
-• Code Analysis - Analyze code quality, patterns, and requirements
-• Code Generation - Generate components, APIs, and more
-• Build & Deploy - Build projects and deploy to various platforms
-• Documentation - Generate comprehensive documentation
-
-[bold]Tips:[/bold]
-• Use arrow keys to navigate menus
-• Press Enter to select an option
-• Press Ctrl+C to go back or exit
-"""
-        console.print(Panel(help_text, border_style="blue"))
-        return True
-
     async def display_main_menu(self) -> bool:
         """Display the main menu and handle selection"""
         choices = list(self.main_menu_items.keys())
         
         answer = await questionary.select(
-            "What would you like to do?",
+            "Select an option:",
             choices=choices,
             style=questionary.Style([
                 ('qmark', 'fg:cyan bold'),
@@ -86,108 +59,8 @@ class CLIManager:
             return action()
         return True
 
-    async def handle_analysis_menu(self) -> bool:
-        """Handle code analysis options"""
-        if not self.agent:
-            console.print("[red]Please initialize a project first[/red]")
-            return True
-            
-        choices = [
-            "🔍 Analyze Code Quality",
-            "🎯 Analyze Requirements",
-            "🧩 Analyze Components",
-            "🔒 Security Analysis",
-            "♿ Accessibility Analysis",
-            "⬅️ Back to Main Menu"
-        ]
-        
-        answer = await questionary.select(
-            "Select analysis type:",
-            choices=choices
-        ).ask_async()
-        
-        if answer and "Back" not in answer:
-            with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as progress:
-                progress.add_task(f"Running {answer}...", total=None)
-                await self.agent.process_user_input(f"analyze {answer}")
-        return True
-
-    async def handle_generation_menu(self) -> bool:
-        """Handle code generation options"""
-        if not self.agent:
-            console.print("[red]Please initialize a project first[/red]")
-            return True
-            
-        choices = [
-            "🧩 Generate Component",
-            "🔌 Generate API",
-            "📝 Generate Documentation",
-            "📊 Generate Schema",
-            "🔄 Generate Migration",
-            "⬅️ Back to Main Menu"
-        ]
-        
-        answer = await questionary.select(
-            "What would you like to generate?",
-            choices=choices
-        ).ask_async()
-        
-        if answer and "Back" not in answer:
-            await self.handle_generation_type(answer)
-        return True
-
-    async def handle_build_menu(self) -> bool:
-        """Handle build and deployment options"""
-        if not self.agent:
-            console.print("[red]Please initialize a project first[/red]")
-            return True
-            
-        choices = [
-            "🏗️ Build Project",
-            "🚀 Deploy Project",
-            "🐳 Build Docker Container",
-            "🔄 Run Tests",
-            "⬅️ Back to Main Menu"
-        ]
-        
-        answer = await questionary.select(
-            "Select build/deploy action:",
-            choices=choices
-        ).ask_async()
-        
-        if answer and "Back" not in answer:
-            with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as progress:
-                progress.add_task(f"Processing {answer}...", total=None)
-                await self.agent.process_user_input(f"build {answer}")
-        return True
-
-    async def handle_docs_menu(self) -> bool:
-        """Handle documentation options"""
-        if not self.agent:
-            console.print("[red]Please initialize a project first[/red]")
-            return True
-            
-        choices = [
-            "📚 Generate Project Documentation",
-            "📘 Generate API Documentation",
-            "🧩 Generate Component Documentation",
-            "📋 Generate Usage Guide",
-            "⬅️ Back to Main Menu"
-        ]
-        
-        answer = await questionary.select(
-            "Select documentation type:",
-            choices=choices
-        ).ask_async()
-        
-        if answer and "Back" not in answer:
-            with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as progress:
-                progress.add_task(f"Generating {answer}...", total=None)
-                await self.agent.process_user_input(f"docs {answer}")
-        return True
-
-    async def handle_init(self) -> bool:
-        """Handle project initialization"""
+    async def handle_new_project(self) -> bool:
+        """Handle new project creation"""
         questions = [
             {
                 "type": "text",
@@ -196,89 +69,70 @@ class CLIManager:
                 "validate": lambda text: len(text) >= 3
             },
             {
-                "type": "select",
-                "name": "project_type",
-                "message": "Select project type:",
-                "choices": ["Next.js", "React", "Vue", "Angular"]
+                "type": "text",
+                "name": "description",
+                "message": "Brief project description:"
             },
             {
-                "type": "checkbox",
-                "name": "features",
-                "message": "Select features:",
+                "type": "select",
+                "name": "type",
+                "message": "Project type:",
                 "choices": [
-                    "Authentication",
-                    "Database",
-                    "API",
-                    "Testing",
-                    "Documentation",
-                    "Docker",
-                    "CI/CD"
+                    "Web Application (Next.js)",
+                    "API Service (Node/Express)",
+                    "Full Stack (Next.js + API)",
+                    "Static Website"
                 ]
             }
         ]
         
-        answers = await questionary.prompt(questions, style=questionary.Style([
-            ('qmark', 'fg:cyan bold'),
-            ('question', 'bold'),
-            ('answer', 'fg:cyan bold'),
-        ]))
-        
+        answers = await questionary.prompt(questions)
         if answers:
             with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as progress:
-                progress.add_task("Initializing project...", total=None)
+                task = progress.add_task("Creating project...", total=None)
                 await self.initialize_agent(str(answers))
-                console.print("[green]✅ Project initialized successfully![/green]")
+                console.print(f"[green]✅ Project '{answers['project_name']}' created successfully![/green]")
         return True
 
-    async def handle_generation_type(self, gen_type: str):
-        """Handle specific generation type"""
-        type_questions = {
-            "🧩 Generate Component": [
-                {"type": "text", "name": "name", "message": "Component name:"},
-                {"type": "select", "name": "style", "message": "Styling solution:", 
-                 "choices": ["Tailwind", "CSS Modules", "Styled Components", "CSS-in-JS"]}
-            ],
-            "🔌 Generate API": [
-                {"type": "text", "name": "endpoint", "message": "API endpoint:"},
-                {"type": "select", "name": "method", "message": "HTTP Method:",
-                 "choices": ["GET", "POST", "PUT", "DELETE"]}
-            ],
-            "📊 Generate Schema": [
-                {"type": "text", "name": "name", "message": "Schema name:"},
-                {"type": "select", "name": "type", "message": "Schema type:",
-                 "choices": ["Database", "API", "Validation"]}
-            ]
-        }
+    async def handle_build_project(self) -> bool:
+        """Handle project building/updating"""
+        if not self.agent:
+            console.print("[red]No active project. Please create a new project first.[/red]")
+            return True
+            
+        description = await questionary.text(
+            "What would you like to add or modify in the project?",
+            style=questionary.Style([
+                ('qmark', 'fg:cyan bold'),
+                ('question', 'bold'),
+                ('answer', 'fg:cyan bold'),
+            ])
+        ).ask_async()
         
-        questions = type_questions.get(gen_type, [])
-        if questions:
-            answers = await questionary.prompt(questions)
-            if answers:
-                with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as progress:
-                    progress.add_task(f"Generating {gen_type}...", total=None)
-                    await self.agent.process_user_input(f"generate {gen_type} {answers}")
+        if description:
+            with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as progress:
+                task = progress.add_task("Processing request...", total=None)
+                await self.agent.process_user_input(description)
+        return True
 
     def display_agent_status(self) -> bool:
         """Display current agent status"""
         if not self.agent:
-            console.print("[red]Agent not initialized. Please initialize a project first.[/red]")
+            console.print("[yellow]No active project. Use 'New Project' to get started.[/yellow]")
             return True
             
         status_panel = Panel(
-            f"[bold]Current Status:[/bold] {self.agent.progress.status}\n"
-            f"[bold]Current Task:[/bold] {self.agent.progress.current_task}\n"
-            f"[bold]Progress:[/bold] {self.agent.progress.progress}%",
-            title="🤖 Agent Status",
+            f"[bold]Project:[/bold] {self.agent.project_name}\n"
+            f"[bold]Status:[/bold] {self.agent.progress.status}\n"
+            f"[bold]Current Task:[/bold] {self.agent.progress.current_task}",
+            title="🤖 Project Status",
             border_style="blue"
         )
         console.print(status_panel)
         return True
 
-@click.command()
-@click.option('--debug', is_flag=True, help='Enable debug logging')
-@click.option('--output-dir', default="./projects", help='Output directory for generated projects')
-def main(debug: bool, output_dir: str):
-    """Auto Agent - Your AI-powered development assistant"""
+async def run_cli(debug: bool = False, output_dir: str = "./projects"):
+    """Run the CLI application"""
     if debug:
         logging.basicConfig(level=logging.DEBUG)
     else:
@@ -287,24 +141,28 @@ def main(debug: bool, output_dir: str):
     # Ensure output directory exists
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
-    async def run_cli():
-        cli_manager = CLIManager()
-        cli_manager.display_welcome()
-        
-        while True:
-            try:
-                should_continue = await cli_manager.display_main_menu()
-                if not should_continue:
-                    console.print("[yellow]👋 Goodbye![/yellow]")
-                    break
-            except KeyboardInterrupt:
-                console.print("\n[yellow]Interrupted by user. Use the Exit option to quit.[/yellow]")
-            except Exception as e:
-                console.print(f"[red]Error: {str(e)}[/red]")
-                if debug:
-                    logging.exception("Error in main menu")
-                    
-    asyncio.run(run_cli())
+    cli_manager = CLIManager()
+    cli_manager.display_welcome()
+    
+    while True:
+        try:
+            should_continue = await cli_manager.display_main_menu()
+            if not should_continue:
+                console.print("[yellow]👋 Goodbye![/yellow]")
+                break
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Use 'Exit' option to quit.[/yellow]")
+        except Exception as e:
+            console.print(f"[red]Error: {str(e)}[/red]")
+            if debug:
+                logging.exception("Error in main menu")
+
+@click.command()
+@click.option('--debug', is_flag=True, help='Enable debug logging')
+@click.option('--output-dir', default="./projects", help='Output directory for generated projects')
+def main(debug: bool, output_dir: str):
+    """Auto Agent - Your AI-powered development assistant"""
+    asyncio.run(run_cli(debug, output_dir))
     
 if __name__ == "__main__":
     main() 

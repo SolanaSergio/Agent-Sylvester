@@ -1,117 +1,149 @@
-from pathlib import Path
+import asyncio
 import json
-import logging
-from typing import Dict, List, Set
-import subprocess
+from pathlib import Path
+from typing import Dict, List
+from src.utils.types import ProjectConfig, DependencyInfo
 
 class DependencyManager:
-    """Manages project dependencies and package installation"""
-    
-    def __init__(self, project_dir: Path):
-        self.project_dir = project_dir
-        self.package_json_path = project_dir / "package.json"
+    async def setup_project_dependencies(self, config: ProjectConfig) -> None:
+        """Set up project dependencies based on configuration"""
+        project_dir = Path(config.name)
         
-    def setup_dependencies(self, requirements: Dict):
-        """Setup and install project dependencies"""
+        # Create package.json
+        package_json = await self._generate_package_json(config)
+        project_dir.joinpath("package.json").write_text(json.dumps(package_json, indent=2))
+        
+        # Create other config files
+        await self._create_config_files(project_dir, config)
+        
+        # Install dependencies (simulated for now)
+        await self._install_dependencies(project_dir)
+
+    async def update_dependencies(self) -> None:
+        """Update project dependencies"""
+        # Implementation for updating dependencies
+        pass
+
+    async def get_dependency_status(self) -> List[DependencyInfo]:
+        """Get status of all project dependencies"""
+        # Read package.json and return dependency info
         try:
-            dependencies = self._determine_dependencies(requirements)
-            dev_dependencies = self._determine_dev_dependencies(requirements)
-            
-            self._update_package_json(dependencies, dev_dependencies)
-            self._install_dependencies()
-            
-        except Exception as e:
-            logging.error(f"Error setting up dependencies: {str(e)}")
-            
-    def _determine_dependencies(self, requirements: Dict) -> Dict[str, str]:
-        """Determine required dependencies based on project requirements"""
-        deps = {
-            "react": "^18.2.0",
-            "react-dom": "^18.2.0",
-            "next": "^13.4.0"
-        }
-        
-        features = requirements.get('features', [])
-        
-        # Add feature-specific dependencies
-        if 'authentication' in features:
-            deps.update({
-                "next-auth": "^4.22.1",
-                "bcryptjs": "^2.4.3"
-            })
-            
-        if 'database' in features:
-            if 'mongodb' in requirements.get('database', '').lower():
-                deps["mongoose"] = "^7.3.1"
-            else:
-                deps["@prisma/client"] = "^4.16.2"
+            with open("package.json", "r") as f:
+                package_data = json.load(f)
                 
-        if 'api' in features:
-            deps["axios"] = "^1.4.0"
+            dependencies = []
             
-        if 'forms' in features:
-            deps.update({
-                "react-hook-form": "^7.45.1",
-                "zod": "^3.21.4"
-            })
+            # Add production dependencies
+            for name, version in package_data.get("dependencies", {}).items():
+                dependencies.append(DependencyInfo(name=name, version=version))
+                
+            # Add dev dependencies
+            for name, version in package_data.get("devDependencies", {}).items():
+                dependencies.append(DependencyInfo(name=name, version=version))
+                
+            return dependencies
             
-        return deps
-        
-    def _determine_dev_dependencies(self, requirements: Dict) -> Dict[str, str]:
-        """Determine required development dependencies"""
-        dev_deps = {
-            "typescript": "^5.1.6",
-            "@types/react": "^18.2.14",
-            "@types/node": "^20.4.2",
-            "eslint": "^8.44.0",
-            "eslint-config-next": "^13.4.9",
-            "prettier": "^3.0.0"
+        except FileNotFoundError:
+            return []
+
+    async def _generate_package_json(self, config: ProjectConfig) -> Dict:
+        """Generate package.json content"""
+        return {
+            "name": config.name,
+            "version": "0.1.0",
+            "private": True,
+            "description": config.description,
+            "scripts": await self._get_scripts(config),
+            "dependencies": await self._get_dependencies(config),
+            "devDependencies": await self._get_dev_dependencies(config)
+        }
+
+    async def _create_config_files(self, project_dir: Path, config: ProjectConfig) -> None:
+        """Create configuration files"""
+        # Create tsconfig.json
+        tsconfig = {
+            "compilerOptions": {
+                "target": "es5",
+                "lib": ["dom", "dom.iterable", "esnext"],
+                "allowJs": True,
+                "skipLibCheck": True,
+                "strict": True,
+                "forceConsistentCasingInFileNames": True,
+                "noEmit": True,
+                "esModuleInterop": True,
+                "module": "esnext",
+                "moduleResolution": "node",
+                "resolveJsonModule": True,
+                "isolatedModules": True,
+                "jsx": "preserve",
+                "incremental": True
+            },
+            "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+            "exclude": ["node_modules"]
+        }
+        project_dir.joinpath("tsconfig.json").write_text(json.dumps(tsconfig, indent=2))
+
+    async def _install_dependencies(self, project_dir: Path) -> None:
+        """Install project dependencies"""
+        # Simulate npm install (will be implemented with actual npm commands)
+        await asyncio.sleep(2)
+
+    async def _get_scripts(self, config: ProjectConfig) -> Dict[str, str]:
+        """Get npm scripts based on configuration"""
+        scripts = {
+            "dev": "next dev" if config.framework == "Next.js" else "react-scripts start",
+            "build": "next build" if config.framework == "Next.js" else "react-scripts build",
+            "start": "next start" if config.framework == "Next.js" else "react-scripts start",
+            "lint": "eslint .",
+            "format": "prettier --write ."
         }
         
-        # Add testing dependencies if needed
-        if requirements.get('testing', True):
+        if "Testing" in config.features:
+            scripts["test"] = "jest"
+            scripts["test:watch"] = "jest --watch"
+            
+        return scripts
+
+    async def _get_dependencies(self, config: ProjectConfig) -> Dict[str, str]:
+        """Get production dependencies based on configuration"""
+        deps = {}
+        
+        # Framework dependencies
+        if config.framework == "React":
+            deps.update({
+                "react": "^18.2.0",
+                "react-dom": "^18.2.0"
+            })
+        elif config.framework == "Next.js":
+            deps.update({
+                "next": "^13.0.0",
+                "react": "^18.2.0",
+                "react-dom": "^18.2.0"
+            })
+        
+        # Feature dependencies
+        if "Authentication" in config.features:
+            deps["next-auth"] = "^4.22.1"
+        if "Database" in config.features:
+            deps["prisma"] = "^4.14.0"
+        
+        return deps
+
+    async def _get_dev_dependencies(self, config: ProjectConfig) -> Dict[str, str]:
+        """Get development dependencies based on configuration"""
+        dev_deps = {
+            "typescript": "^5.0.0",
+            "@types/react": "^18.2.0",
+            "@types/node": "^18.0.0",
+            "eslint": "^8.40.0",
+            "prettier": "^2.8.8"
+        }
+        
+        if "Testing" in config.features:
             dev_deps.update({
-                "jest": "^29.6.1",
+                "jest": "^29.5.0",
                 "@testing-library/react": "^14.0.0",
                 "@testing-library/jest-dom": "^5.16.5"
             })
             
-        return dev_deps
-        
-    def _update_package_json(self, dependencies: Dict[str, str], dev_dependencies: Dict[str, str]):
-        """Update package.json with new dependencies"""
-        if self.package_json_path.exists():
-            with open(self.package_json_path, 'r') as f:
-                package_data = json.load(f)
-        else:
-            package_data = {
-                "name": self.project_dir.name,
-                "version": "0.1.0",
-                "private": True
-            }
-            
-        package_data["dependencies"] = dependencies
-        package_data["devDependencies"] = dev_dependencies
-        
-        with open(self.package_json_path, 'w') as f:
-            json.dump(package_data, f, indent=2)
-            
-    def _install_dependencies(self):
-        """Install all dependencies using npm"""
-        try:
-            subprocess.run(['npm', 'install'], cwd=str(self.project_dir), check=True)
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error installing dependencies: {str(e)}")
-            raise 
-
-    async def cleanup(self):
-        """Cleanup any temporary dependency files"""
-        try:
-            # Remove node_modules if specified
-            if self.project_dir.exists():
-                node_modules = self.project_dir / "node_modules"
-                if node_modules.exists():
-                    import shutil
-                    shutil.rmtree(node_modules)
-        except Exception as e:
-            logging.error(f"Error cleaning up dependency manager: {str(e)}") 
+        return dev_deps 

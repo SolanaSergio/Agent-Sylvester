@@ -1,463 +1,196 @@
-from pathlib import Path
-from typing import Dict, List
-import os
-import json
-import shutil
+import asyncio
 import subprocess
-import logging
+from pathlib import Path
+from typing import Dict, List, Optional
+from src.utils.types import ProjectConfig
 
 class ProjectBuilder:
-    def __init__(self, root_path: str):
-        self.root_path = Path(root_path)
-        self.root_path.mkdir(parents=True, exist_ok=True)
+    def __init__(self):
+        self.config: Optional[ProjectConfig] = None
+        self.requirements: Dict = {}
+
+    async def initialize_project(self, config: ProjectConfig, requirements: Dict) -> None:
+        """Initialize a new project with the given configuration"""
+        self.config = config
+        self.requirements = requirements
         
-    async def create_project(self, requirements: Dict) -> Path:
-        """Create a new project with the specified requirements"""
-        project_name = self._generate_project_name(requirements)
-        project_dir = self.root_path / project_name
+        # Create project directory
+        project_dir = Path(config.name)
+        project_dir.mkdir(exist_ok=True)
         
-        try:
-            # Create project using appropriate template
-            project_type = requirements.get('project_type', 'next.js')
-            if project_type == 'next.js':
-                await self._create_nextjs_project(project_dir, requirements)
-            else:
-                await self._create_react_project(project_dir, requirements)
-                
-            # Setup project structure
-            await self._setup_project_structure(project_dir, requirements)
-            
-            # Add styling configuration
-            await self._setup_styling(project_dir, requirements.get('styling', {}))
-            
-            # Update package.json with dependencies
-            await self._update_dependencies(project_dir, requirements.get('dependencies', {}))
-            
-            # Setup environment variables
-            await self._setup_env_vars(project_dir, requirements)
-            
-            # Initialize git repository
-            await self._initialize_git(project_dir)
-            
-            return project_dir
-            
-        except Exception as e:
-            logging.error(f"Error creating project: {str(e)}")
-            if project_dir.exists():
-                shutil.rmtree(project_dir)
-            raise
-            
-    def _generate_project_name(self, requirements: Dict) -> str:
-        """Generate a suitable project name from requirements"""
-        if 'name' in requirements:
-            return requirements['name'].lower().replace(' ', '-')
-            
-        project_type = requirements.get('project_type', 'app')
-        features = requirements.get('features', [])
+        # Initialize git repository
+        await self._init_git(project_dir)
         
-        if 'api' in features:
-            prefix = 'api'
-        elif 'dashboard' in project_type:
-            prefix = 'dashboard'
-        elif 'static' in project_type:
-            prefix = 'site'
-        else:
-            prefix = 'app'
+        # Create initial project files
+        await self._create_initial_files(project_dir)
+
+    async def generate_structure(self) -> None:
+        """Generate the project's directory structure"""
+        if not self.config:
+            raise ValueError("Project not initialized")
             
-        # Add a timestamp to ensure uniqueness
-        from datetime import datetime
-        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        project_dir = Path(self.config.name)
         
-        return f"{prefix}-{timestamp}"
-            
-    async def _create_nextjs_project(self, project_dir: Path, requirements: Dict):
-        """Create a Next.js project"""
-        try:
-            # Create Next.js project with TypeScript and other features
-            subprocess.run([
-                'npx',
-                'create-next-app@latest',
-                str(project_dir),
-                '--typescript',
-                '--tailwind',
-                '--eslint',
-                '--app',
-                '--src-dir',
-                '--import-alias', '@/*'
-            ], check=True)
-            
-            # Add additional configurations
-            await self._setup_nextjs_config(project_dir, requirements)
-            
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error creating Next.js project: {str(e)}")
-            raise
-            
-    async def _create_react_project(self, project_dir: Path, requirements: Dict):
-        """Create a React project"""
-        try:
-            # Create React project with TypeScript
-            subprocess.run([
-                'npx',
-                'create-react-app',
-                str(project_dir),
-                '--template', 'typescript'
-            ], check=True)
-            
-            # Add additional configurations
-            await self._setup_react_config(project_dir, requirements)
-            
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error creating React project: {str(e)}")
-            raise
-            
-    async def _setup_project_structure(self, project_dir: Path, requirements: Dict):
-        """Setup project directory structure"""
         # Create standard directories
         directories = [
-            'src/components',
-            'src/layouts',
-            'src/hooks',
-            'src/utils',
-            'src/types',
-            'src/styles',
-            'src/assets',
-            'src/constants',
-            'public'
+            "src",
+            "src/components",
+            "src/pages",
+            "src/styles",
+            "src/utils",
+            "src/hooks",
+            "src/contexts",
+            "src/services",
+            "public",
+            "tests",
+            "docs"
         ]
         
-        # Add feature-specific directories
-        features = requirements.get('features', [])
-        if 'api' in features:
-            directories.extend([
-                'src/api',
-                'src/services',
-                'src/middleware'
-            ])
-            
-        if 'authentication' in features:
-            directories.extend([
-                'src/auth',
-                'src/context'
-            ])
-            
-        if 'database' in features:
-            directories.extend([
-                'src/models',
-                'src/migrations',
-                'prisma'
-            ])
-            
-        # Create all directories
         for directory in directories:
-            (project_dir / directory).mkdir(parents=True, exist_ok=True)
+            project_dir.joinpath(directory).mkdir(parents=True, exist_ok=True)
+
+    async def generate_components(self) -> None:
+        """Generate initial project components"""
+        if not self.config:
+            raise ValueError("Project not initialized")
             
-        # Create necessary files
-        await self._create_base_files(project_dir, requirements)
-            
-    async def _setup_styling(self, project_dir: Path, styling: Dict):
-        """Setup styling configuration"""
-        try:
-            if styling.get('tailwind'):
-                # Install and configure Tailwind CSS
-                subprocess.run(['npm', 'install', '-D', 'tailwindcss', 'postcss', 'autoprefixer'],
-                             cwd=project_dir, check=True)
-                subprocess.run(['npx', 'tailwindcss', 'init', '-p'],
-                             cwd=project_dir, check=True)
-                
-            if styling.get('styled_components'):
-                # Install and configure styled-components
-                subprocess.run(['npm', 'install', 'styled-components', '@types/styled-components'],
-                             cwd=project_dir, check=True)
-                
-            if styling.get('sass'):
-                # Install and configure Sass
-                subprocess.run(['npm', 'install', '-D', 'sass'],
-                             cwd=project_dir, check=True)
-                
-            # Create base styles
-            await self._create_base_styles(project_dir, styling)
-            
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error setting up styling: {str(e)}")
-            raise
-            
-    async def _update_dependencies(self, project_dir: Path, dependencies: Dict):
-        """Update package.json with required dependencies"""
-        try:
-            package_json_path = project_dir / 'package.json'
-            
-            with open(package_json_path) as f:
-                package_data = json.load(f)
-                
-            # Update dependencies
-            package_data['dependencies'].update(dependencies)
-            
-            # Add development dependencies
-            dev_dependencies = {
-                '@typescript-eslint/eslint-plugin': '^5.0.0',
-                '@typescript-eslint/parser': '^5.0.0',
-                'eslint-config-prettier': '^8.0.0',
-                'prettier': '^2.0.0',
-                'husky': '^8.0.0',
-                'lint-staged': '^13.0.0'
-            }
-            
-            package_data.setdefault('devDependencies', {})
-            package_data['devDependencies'].update(dev_dependencies)
-            
-            # Add scripts
-            package_data.setdefault('scripts', {})
-            package_data['scripts'].update({
-                'format': 'prettier --write .',
-                'lint': 'eslint . --ext .ts,.tsx',
-                'type-check': 'tsc --noEmit',
-                'prepare': 'husky install'
-            })
-            
-            # Write updated package.json
-            with open(package_json_path, 'w') as f:
-                json.dump(package_data, f, indent=2)
-                
-            # Install dependencies
-            subprocess.run(['npm', 'install'], cwd=project_dir, check=True)
-            
-        except Exception as e:
-            logging.error(f"Error updating dependencies: {str(e)}")
-            raise
-            
-    async def _setup_env_vars(self, project_dir: Path, requirements: Dict):
-        """Setup environment variables"""
-        try:
-            env_vars = {
-                'NEXT_PUBLIC_APP_URL': 'http://localhost:3000',
-                'NODE_ENV': 'development'
-            }
-            
-            # Add feature-specific env vars
-            features = requirements.get('features', [])
-            
-            if 'database' in features:
-                if 'mongodb' in requirements.get('database', '').lower():
-                    env_vars['MONGODB_URI'] = 'mongodb://localhost:27017/dbname'
-                else:
-                    env_vars['DATABASE_URL'] = 'postgresql://user:password@localhost:5432/dbname'
-                    
-            if 'authentication' in features:
-                env_vars.update({
-                    'NEXTAUTH_URL': 'http://localhost:3000',
-                    'NEXTAUTH_SECRET': 'your-secret-key-min-32-chars',
-                    'JWT_SECRET': 'your-jwt-secret-key-min-32-chars'
-                })
-                
-            # Write .env files
-            env_content = '\n'.join(f'{k}={v}' for k, v in env_vars.items())
-            
-            (project_dir / '.env.example').write_text(env_content)
-            (project_dir / '.env.local').write_text(env_content)
-            (project_dir / '.env.development').write_text(env_content)
-            
-        except Exception as e:
-            logging.error(f"Error setting up environment variables: {str(e)}")
-            raise
-            
-    async def _initialize_git(self, project_dir: Path):
+        project_dir = Path(self.config.name)
+        components_dir = project_dir / "src/components"
+        
+        # Generate basic components
+        basic_components = {
+            "Layout": self._get_layout_template(),
+            "Header": self._get_header_template(),
+            "Footer": self._get_footer_template(),
+            "Button": self._get_button_template(),
+            "Card": self._get_card_template()
+        }
+        
+        for name, template in basic_components.items():
+            component_file = components_dir / f"{name}.tsx"
+            component_file.write_text(template)
+
+    async def _init_git(self, project_dir: Path) -> None:
         """Initialize git repository"""
         try:
-            # Initialize git
-            subprocess.run(['git', 'init'], cwd=project_dir, check=True)
+            subprocess.run(["git", "init"], cwd=project_dir, check=True, capture_output=True)
             
             # Create .gitignore
-            gitignore_content = '''
-# dependencies
-/node_modules
-/.pnp
-.pnp.js
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
+            gitignore_content = """
+node_modules/
+.next/
+build/
+dist/
+.env
+.env.local
+*.log
 .DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# local env files
-.env*.local
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-'''
-            (project_dir / '.gitignore').write_text(gitignore_content)
-            
-            # Initial commit
-            subprocess.run(['git', 'add', '.'], cwd=project_dir, check=True)
-            subprocess.run(['git', 'commit', '-m', 'Initial commit'], cwd=project_dir, check=True)
+coverage/
+"""
+            project_dir.joinpath(".gitignore").write_text(gitignore_content.strip())
             
         except subprocess.CalledProcessError as e:
-            logging.error(f"Error initializing git: {str(e)}")
-            raise
-            
-    async def _create_base_files(self, project_dir: Path, requirements: Dict):
-        """Create base project files"""
-        try:
-            # Create README.md
-            readme_content = f'''
-# {project_dir.name}
+            raise Exception(f"Failed to initialize git repository: {e.stderr.decode()}")
 
-{requirements.get('description', 'A Next.js project')}
+    def _get_layout_template(self) -> str:
+        return """
+import { ReactNode } from 'react';
+import Header from './Header';
+import Footer from './Footer';
 
-## Features
+interface LayoutProps {
+    children: ReactNode;
+}
 
-{self._format_features(requirements.get('features', []))}
+export default function Layout({ children }: LayoutProps) {
+    return (
+        <div className="min-h-screen flex flex-col">
+            <Header />
+            <main className="flex-grow container mx-auto px-4 py-8">
+                {children}
+            </main>
+            <Footer />
+        </div>
+    );
+}
+"""
 
-## Getting Started
+    def _get_header_template(self) -> str:
+        return """
+export default function Header() {
+    return (
+        <header className="bg-white shadow">
+            <div className="container mx-auto px-4 py-6">
+                <h1 className="text-2xl font-bold">Your App Name</h1>
+            </div>
+        </header>
+    );
+}
+"""
 
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
+    def _get_footer_template(self) -> str:
+        return """
+export default function Footer() {
+    return (
+        <footer className="bg-gray-100">
+            <div className="container mx-auto px-4 py-6">
+                <p className="text-center text-gray-600">
+                    © {new Date().getFullYear()} Your App Name. All rights reserved.
+                </p>
+            </div>
+        </footer>
+    );
+}
+"""
 
-2. Set up environment variables:
-   - Copy `.env.example` to `.env.local`
-   - Update the variables as needed
+    def _get_button_template(self) -> str:
+        return """
+import { ButtonHTMLAttributes } from 'react';
 
-3. Run the development server:
-   ```bash
-   npm run dev
-   ```
+interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+    variant?: 'primary' | 'secondary' | 'outline';
+}
 
-Open [http://localhost:3000](http://localhost:3000) to view the app.
-'''
-            (project_dir / 'README.md').write_text(readme_content)
-            
-            # Create base components
-            await self._create_base_components(project_dir, requirements)
-            
-        except Exception as e:
-            logging.error(f"Error creating base files: {str(e)}")
-            raise
-            
-    def _format_features(self, features: List[str]) -> str:
-        """Format features list for README"""
-        if not features:
-            return "- Basic Next.js setup"
-            
-        return '\n'.join(f"- {feature.title()}" for feature in features)
-            
-    async def _create_base_components(self, project_dir: Path, requirements: Dict):
-        """Create base component files"""
-        # This will be handled by the ComponentBuilder
-        pass
-        
-    async def _setup_nextjs_config(self, project_dir: Path, requirements: Dict):
-        """Setup Next.js specific configuration"""
-        try:
-            config_content = '''
-/** @type {import('next').NextConfig} */
-const nextConfig = {
-  reactStrictMode: true,
-  swcMinify: true,
-  images: {
-    domains: [],
-  },
-  async headers() {
-    return [
-      {
-        source: '/api/:path*',
-        headers: [
-          { key: 'Access-Control-Allow-Credentials', value: 'true' },
-          { key: 'Access-Control-Allow-Origin', value: '*' },
-          { key: 'Access-Control-Allow-Methods', value: 'GET,OPTIONS,PATCH,DELETE,POST,PUT' },
-          { key: 'Access-Control-Allow-Headers', value: 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization' },
-        ],
-      },
-    ];
-  },
-};
+export default function Button({ 
+    children, 
+    variant = 'primary', 
+    className = '', 
+    ...props 
+}: ButtonProps) {
+    const baseStyles = 'px-4 py-2 rounded font-medium focus:outline-none focus:ring-2';
+    const variantStyles = {
+        primary: 'bg-blue-500 text-white hover:bg-blue-600',
+        secondary: 'bg-gray-500 text-white hover:bg-gray-600',
+        outline: 'border-2 border-blue-500 text-blue-500 hover:bg-blue-50'
+    };
 
-module.exports = nextConfig;
-'''
-            (project_dir / 'next.config.js').write_text(config_content)
-            
-        except Exception as e:
-            logging.error(f"Error setting up Next.js config: {str(e)}")
-            raise
-            
-    async def _setup_react_config(self, project_dir: Path, requirements: Dict):
-        """Setup React specific configuration"""
-        try:
-            # Add React specific configurations
-            config_files = {
-                'tsconfig.json': '''{
-  "compilerOptions": {
-    "target": "es5",
-    "lib": ["dom", "dom.iterable", "esnext"],
-    "allowJs": true,
-    "skipLibCheck": true,
-    "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
-    "strict": true,
-    "forceConsistentCasingInFileNames": true,
-    "noFallthroughCasesInSwitch": true,
-    "module": "esnext",
-    "moduleResolution": "node",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "jsx": "react-jsx",
-    "baseUrl": "src"
-  },
-  "include": ["src"]
-}''',
-                '.eslintrc.json': '''{
-  "extends": [
-    "react-app",
-    "react-app/jest",
-    "plugin:@typescript-eslint/recommended",
-    "prettier"
-  ],
-  "plugins": ["@typescript-eslint"],
-  "rules": {
-    "@typescript-eslint/no-unused-vars": "error",
-    "@typescript-eslint/no-explicit-any": "warn"
-  }
-}'''
-            }
-            
-            for filename, content in config_files.items():
-                (project_dir / filename).write_text(content)
-                
-        except Exception as e:
-            logging.error(f"Error setting up React config: {str(e)}")
-            raise
-            
-    async def setup_version_control(self):
-        """Setup version control for the project"""
-        # This is handled by _initialize_git
-        pass
-        
-    async def cleanup(self):
-        """Cleanup any temporary files"""
-        try:
-            temp_dir = self.root_path / 'temp'
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir)
-        except Exception as e:
-            logging.error(f"Error during cleanup: {str(e)}")
-            raise 
+    return (
+        <button 
+            className={`${baseStyles} ${variantStyles[variant]} ${className}`}
+            {...props}
+        >
+            {children}
+        </button>
+    );
+}
+"""
+
+    def _get_card_template(self) -> str:
+        return """
+import { ReactNode } from 'react';
+
+interface CardProps {
+    title?: string;
+    children: ReactNode;
+    className?: string;
+}
+
+export default function Card({ title, children, className = '' }: CardProps) {
+    return (
+        <div className={`bg-white rounded-lg shadow p-6 ${className}`}>
+            {title && <h2 className="text-xl font-semibold mb-4">{title}</h2>}
+            {children}
+        </div>
+    );
+}
+""" 

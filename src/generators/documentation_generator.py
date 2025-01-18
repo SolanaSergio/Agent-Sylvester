@@ -7,6 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 from jinja2 import Environment, FileSystemLoader, Template
+from src.utils.types import ProjectConfig
 
 @dataclass
 class DocItem:
@@ -418,3 +419,90 @@ Examples:
                 annotation = self._get_annotation_name(arg.annotation)
                 args.append(f"{arg.arg}: {annotation}")
         return f"{node.name}({', '.join(args)})" 
+
+    async def generate_project_documentation(self, config: ProjectConfig) -> None:
+        """Generate complete project documentation"""
+        project_dir = Path(config.name)
+        
+        # Generate README
+        await self._generate_readme(project_dir, config)
+        
+        # Generate component documentation
+        if project_dir.joinpath("src/components").exists():
+            await self._generate_component_docs(project_dir)
+            
+        # Generate API documentation if needed
+        if "API" in config.features:
+            await self._generate_api_docs(project_dir)
+            
+        # Generate setup documentation
+        await self._generate_setup_docs(project_dir, config)
+
+    async def update_documentation(self) -> None:
+        """Update existing documentation"""
+        # Implementation for updating docs
+        pass
+
+    async def _generate_readme(self, project_dir: Path, config: ProjectConfig) -> None:
+        """Generate project README.md"""
+        readme_content = f"""# {config.name}
+
+{config.description}
+
+## Features
+
+{self._format_features(config.features)}
+
+## Getting Started
+
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Start the development server:
+   ```bash
+   npm run dev
+   ```
+
+## Available Scripts
+
+- `npm run dev` - Start development server
+- `npm run build` - Build for production
+- `npm start` - Start production server
+- `npm run lint` - Run ESLint
+- `npm run format` - Format code with Prettier
+"""
+        
+        if "Testing" in config.features:
+            readme_content += "- `npm test` - Run tests\n"
+            
+        project_dir.joinpath("README.md").write_text(readme_content)
+
+    async def _generate_component_docs(self, project_dir: Path) -> None:
+        """Generate documentation for components"""
+        docs_dir = project_dir.joinpath("docs/components")
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Implementation for component documentation
+        pass
+
+    async def _generate_api_docs(self, project_dir: Path) -> None:
+        """Generate API documentation"""
+        api_docs_dir = project_dir.joinpath("docs/api")
+        api_docs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Implementation for API documentation
+        pass
+
+    async def _generate_setup_docs(self, project_dir: Path, config: ProjectConfig) -> None:
+        """Generate setup documentation"""
+        setup_docs_dir = project_dir.joinpath("docs/setup")
+        setup_docs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Implementation for setup documentation
+        pass
+
+    def _format_features(self, features: List[str]) -> str:
+        """Format feature list for markdown"""
+        return "\n".join([f"- {feature}" for feature in features]) 

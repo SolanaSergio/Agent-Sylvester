@@ -70,3 +70,26 @@ class ResponsivePattern:
     rules: Dict[str, List[str]]
     mobile_first: bool
     container_queries: bool 
+
+@dataclass
+class ProjectConfig:
+    name: str
+    description: str
+    framework: str
+    features: List[str]
+
+@dataclass
+class ComponentStatus:
+    name: str
+    status: str
+
+@dataclass
+class DependencyInfo:
+    name: str
+    version: str
+
+@dataclass
+class ProjectStatus:
+    components: List[ComponentStatus]
+    dependencies: List[DependencyInfo]
+    issues: List[str] 
