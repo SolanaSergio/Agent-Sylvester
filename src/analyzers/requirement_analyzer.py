@@ -31,6 +31,10 @@ class RequirementAnalyzer:
         logger.info(f"Using project directory: {self.project_dir}")
         
         try:
+            # First, analyze the project description to extract additional requirements
+            description_requirements = await self.analyze_user_request(config.description) if config.description else {}
+            
+            # Merge description-based requirements with explicit configuration
             requirements = {
                 "dependencies": await self._get_dependencies(config),
                 "devDependencies": await self._get_dev_dependencies(config),
@@ -39,6 +43,39 @@ class RequirementAnalyzer:
                 "features": await self._analyze_features(config),
                 "structure": await self._analyze_structure(config)
             }
+
+            # Add features detected from description
+            if description_requirements.get("features"):
+                for feature in description_requirements["features"]:
+                    if feature not in config.features:
+                        config.features.append(feature)
+                        logger.info(f"Added feature from description: {feature}")
+
+            # Add API endpoints if detected in description
+            if description_requirements.get("api_endpoints"):
+                requirements["api_endpoints"] = description_requirements["api_endpoints"]
+                if "api" not in config.features:
+                    config.features.append("api")
+                    logger.info("Added API feature based on description")
+
+            # Add database requirements if detected in description
+            if description_requirements.get("database", {}).get("needed"):
+                requirements["database"] = description_requirements["database"]
+                if "database" not in config.features:
+                    config.features.append("database")
+                    logger.info("Added database feature based on description")
+
+            # Add UI components if detected in description
+            if description_requirements.get("components"):
+                requirements["components"] = description_requirements["components"]
+                if "ui" not in config.features:
+                    config.features.append("ui")
+                    logger.info("Added UI feature based on description")
+
+            # Update dependencies based on new features
+            requirements["dependencies"] = await self._get_dependencies(config)
+            requirements["devDependencies"] = await self._get_dev_dependencies(config)
+
             logger.info("Requirements analysis complete")
             return requirements
         except Exception as e:
@@ -559,3 +596,150 @@ class RequirementAnalyzer:
             structure["prisma"] = True
             
         return structure 
+
+    async def analyze_requirements(self, project_path: Path, description: str) -> dict:
+        """Analyze project requirements based on description and path"""
+        try:
+            # Initialize requirements structure
+            requirements = {
+                'structure': {
+                    'src': {
+                        'components': True,
+                        'pages': True,
+                        'hooks': True,
+                        'contexts': True,
+                        'styles': True,
+                        'utils': True,
+                        'services': True,
+                        'types': True
+                    },
+                    'public': True,
+                    'tests': True
+                },
+                'dependencies': {
+                    'dependencies': {
+                        'next': 'latest',
+                        'react': 'latest',
+                        'react-dom': 'latest'
+                    },
+                    'devDependencies': {
+                        'typescript': 'latest',
+                        '@types/react': 'latest',
+                        '@types/node': 'latest',
+                        'eslint': 'latest',
+                        'eslint-config-next': 'latest'
+                    }
+                },
+                'configurations': {
+                    'tsconfig.json': True,
+                    '.eslintrc.js': True,
+                    '.prettierrc': True,
+                    '.gitignore': True,
+                    '.env.example': True,
+                    'next.config.js': True
+                },
+                'features': self._analyze_features(description),
+                'styles': ['tailwind'],
+                'api_endpoints': self._analyze_api_requirements(description),
+                'database': self._analyze_database_requirements(description)
+            }
+
+            # Add feature-specific requirements
+            if 'authentication' in requirements['features']:
+                requirements['dependencies']['dependencies']['next-auth'] = 'latest'
+
+            if 'api' in requirements['features']:
+                requirements['dependencies']['dependencies']['axios'] = 'latest'
+
+            if 'form' in requirements['features']:
+                requirements['dependencies']['dependencies']['react-hook-form'] = 'latest'
+                requirements['dependencies']['dependencies']['zod'] = 'latest'
+
+            if 'database' in requirements['features']:
+                requirements['dependencies']['dependencies']['prisma'] = 'latest'
+                requirements['dependencies']['devDependencies']['@prisma/client'] = 'latest'
+
+            return requirements
+
+        except Exception as e:
+            logger.error(f"Failed to analyze requirements: {str(e)}")
+            raise
+
+    def _analyze_features(self, description: str) -> List[str]:
+        """Analyze description to determine required features"""
+        features = []
+        
+        # Common feature keywords
+        feature_patterns = {
+            'authentication': ['auth', 'login', 'signup', 'user account'],
+            'api': ['api', 'endpoint', 'backend', 'server'],
+            'database': ['database', 'storage', 'persist', 'save'],
+            'form': ['form', 'input', 'submit', 'validation'],
+            'routing': ['route', 'navigation', 'pages'],
+            'seo': ['seo', 'meta', 'head'],
+            'analytics': ['analytics', 'tracking', 'metrics']
+        }
+        
+        description_lower = description.lower()
+        for feature, patterns in feature_patterns.items():
+            if any(pattern in description_lower for pattern in patterns):
+                features.append(feature)
+        
+        return features
+
+    def _analyze_api_requirements(self, description: str) -> List[dict]:
+        """Analyze description to determine required API endpoints"""
+        endpoints = []
+        
+        # Common API patterns
+        api_patterns = {
+            'auth': {
+                'patterns': ['auth', 'login', 'signup'],
+                'endpoints': [
+                    {'path': '/api/auth/login', 'method': 'POST'},
+                    {'path': '/api/auth/signup', 'method': 'POST'},
+                    {'path': '/api/auth/logout', 'method': 'POST'}
+                ]
+            },
+            'user': {
+                'patterns': ['user', 'profile', 'account'],
+                'endpoints': [
+                    {'path': '/api/user/profile', 'method': 'GET'},
+                    {'path': '/api/user/update', 'method': 'PUT'}
+                ]
+            }
+        }
+        
+        description_lower = description.lower()
+        for category, info in api_patterns.items():
+            if any(pattern in description_lower for pattern in info['patterns']):
+                endpoints.extend(info['endpoints'])
+        
+        return endpoints
+
+    def _analyze_database_requirements(self, description: str) -> dict:
+        """Analyze description to determine database requirements"""
+        database_req = {
+            'needed': False,
+            'type': None,
+            'models': []
+        }
+        
+        # Check if database is needed
+        db_indicators = ['database', 'storage', 'persist', 'save', 'data']
+        if any(indicator in description.lower() for indicator in db_indicators):
+            database_req['needed'] = True
+            database_req['type'] = 'prisma'  # Default to Prisma for Next.js projects
+            
+            # Analyze potential models
+            model_patterns = {
+                'user': ['user', 'account', 'profile'],
+                'post': ['post', 'article', 'content'],
+                'comment': ['comment', 'reply', 'response']
+            }
+            
+            for model, patterns in model_patterns.items():
+                if any(pattern in description.lower() for pattern in patterns):
+                    database_req['models'].append(model)
+        
+        return database_req 

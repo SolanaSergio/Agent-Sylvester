@@ -5,7 +5,8 @@ import logging
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from rich.logging import RichHandler
 import asyncio
 from questionary import Style
 
@@ -14,7 +15,15 @@ from src.utils.types import AgentStatus
 from src.managers.ui_manager import UIManager
 from src.utils.project_config import ProjectConfig
 
+# Set up rich console and logging
 console = Console()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(rich_tracebacks=True, show_path=False)]
+)
+logger = logging.getLogger("auto_agent")
 
 class CLIManager:
     """Manages the CLI interface and user interactions"""
@@ -22,6 +31,8 @@ class CLIManager:
     def __init__(self):
         self.ui = UIManager()
         self.agent: Optional[MetaAgent] = None
+        self.progress = None
+        self.task_id = None
         self.main_menu_items = {
             "🆕 Create New Project": self.handle_new_project,
             "🔨 Build/Update Project": self.handle_build_project,
@@ -113,6 +124,33 @@ class CLIManager:
                 return None, False
             return answer, True
 
+    def start_progress(self, description: str) -> None:
+        """Start a new progress indicator"""
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console
+        )
+        self.progress.start()
+        self.task_id = self.progress.add_task(description, total=100)
+
+    def update_progress(self, description: str, advance: float = None) -> None:
+        """Update progress with new description and percentage"""
+        if self.progress and self.task_id is not None:
+            update_kwargs = {"description": description}
+            if advance is not None:
+                update_kwargs["advance"] = advance
+            self.progress.update(self.task_id, **update_kwargs)
+
+    def stop_progress(self) -> None:
+        """Stop the progress indicator"""
+        if self.progress:
+            self.progress.stop()
+            self.progress = None
+            self.task_id = None
+
     async def handle_new_project(self) -> bool:
         """Handle new project creation"""
         try:
@@ -128,6 +166,18 @@ class CLIManager:
                 if not should_continue:
                     return True
                 if not project_name:
+                    continue
+
+                # Get project purpose/description
+                project_purpose, should_continue = await self.prompt_with_back(
+                    lambda: questionary.text(
+                        "What would you like to build? Describe your project:",
+                        instruction="(e.g., 'A music player website with playlist management and audio visualization')"
+                    ).ask_async()
+                )
+                if not should_continue:
+                    return True
+                if not project_purpose:
                     continue
 
                 # Get project location
@@ -262,122 +312,50 @@ class CLIManager:
                 config = ProjectConfig(
                     name=project_name,
                     project_type=project_type,
+                    description=project_purpose,
+                    project_location=project_location,
                     features=selected_features,
-                    styling=styling,
-                    project_location=project_location
+                    styling=styling
                 )
 
-                # Initialize project with progress bar
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    console=console
-                ) as progress:
-                    task = progress.add_task("Creating your project...", total=None)
-                    try:
-                        # Create MetaAgent instance
-                        self.agent = MetaAgent()
-                        
-                        # Initialize project
-                        try:
-                            await self.agent.initialize_project(config)
-                        except ValueError as e:
-                            error_msg = str(e)
-                            if error_msg.startswith("DIRECTORY_EXISTS:"):
-                                # Directory exists, ask user what to do
-                                dir_path = error_msg.split(":", 1)[1]
-                                console.print(f"\n[yellow]Directory already exists:[/yellow] {dir_path}")
-                                console.print("[yellow]This could be from a previous project creation attempt.[/yellow]")
-                                
-                                action = await questionary.select(
-                                    "What would you like to do?",
-                                    choices=[
-                                        questionary.Choice("Choose a different name", "rename"),
-                                        questionary.Choice("Choose a different location", "relocate"),
-                                        questionary.Choice("Delete existing directory and continue", "delete"),
-                                        questionary.Choice("Cancel", "cancel")
-                                    ],
-                                    style=Style([
-                                        ('qmark', 'fg:cyan bold'),
-                                        ('question', 'bold'),
-                                        ('answer', 'fg:cyan bold'),
-                                        ('pointer', 'fg:cyan bold'),
-                                        ('highlighted', 'fg:cyan bold'),
-                                    ])
-                                ).ask_async()
-                                
-                                if action == "rename":
-                                    continue  # Restart from project name
-                                elif action == "relocate":
-                                    # Keep same name but ask for new location
-                                    project_location, should_continue = await self.prompt_with_back(
-                                        lambda: questionary.path(
-                                            "Enter a different directory path:",
-                                            default=str(Path.home() / "Desktop"),
-                                            validate=lambda p: Path(p).exists(),
-                                            only_directories=True
-                                        ).ask_async()
-                                    )
-                                    if not should_continue or not project_location:
-                                        continue
-                                    # Update config and retry
-                                    config.project_location = project_location
-                                    await self.agent.initialize_project(config)
-                                elif action == "delete":
-                                    import shutil
-                                    try:
-                                        progress.update(task, description=f"Deleting existing directory...")
-                                        shutil.rmtree(dir_path)
-                                        progress.update(task, description=f"Retrying project creation...")
-                                        await self.agent.initialize_project(config)
-                                    except Exception as del_error:
-                                        progress.update(task, description=f"Error: Could not delete directory: {str(del_error)}")
-                                        console.print(f"[red]Failed to delete directory: {str(del_error)}[/red]")
-                                        await asyncio.sleep(1)
-                                        continue
-                                else:  # Cancel
-                                    progress.update(task, description="Project creation cancelled")
-                                    await asyncio.sleep(1)
-                                    return True
-                            else:
-                                raise  # Re-raise if it's a different ValueError
-                        
-                        # Update progress and show success message
-                        progress.update(task, description="Project created successfully!")
-                        await asyncio.sleep(1)  # Give user time to see success message
-                        
-                        # Show success message with next steps
-                        console.print("\n[bold green]✅ Project created successfully![/bold green]")
-                        console.print(f"\n[bold cyan]Project '{project_name}' is ready![/bold cyan]")
-                        
-                        # Show next steps
-                        console.print("\n[bold yellow]Next steps:[/bold yellow]")
-                        console.print(f"1. cd {project_name}")
-                        console.print("2. npm install")
-                        console.print("3. npm run dev")
-                        
-                        return True  # Success, exit the loop
-                        
-                    except Exception as e:
-                        progress.update(task, description=f"Error: {str(e)}")
-                        await asyncio.sleep(1)
-                        console.print(f"[red]Error creating project: {str(e)}[/red]")
-                        logging.exception("Project creation failed")
-                        
-                        # Ask if user wants to try again
-                        try_again = await questionary.confirm(
-                            "Would you like to try again?",
-                            default=True
-                        ).ask_async()
-                        
-                        if try_again:
-                            continue  # Restart the loop
-                        return True  # Exit if user doesn't want to try again
+                # Initialize agent if needed
+                if not self.agent:
+                    self.agent = MetaAgent()
+
+                # Start progress display with initial status
+                self.start_progress("Initializing project creation...")
+
+                try:
+                    # Subscribe to progress updates from the agent
+                    def progress_callback(status: str, percentage: float):
+                        self.update_progress(status, percentage - self.progress.tasks[self.task_id].completed)
+
+                    # Register the callback with the agent's progress tracker
+                    self.agent.progress_tracker.register_callback(progress_callback)
+                    
+                    # Initialize the project
+                    await self.agent.initialize_project(config)
+                    
+                    self.update_progress("Project created successfully!", 100)
+                    console.print("[green]✓[/green] Project created successfully!")
+                    return True
+
+                except Exception as e:
+                    self.stop_progress()
+                    error_msg = str(e)
+                    console.print(f"[red]Error creating project:[/red] {error_msg}")
+                    retry = await questionary.confirm("Would you like to try again?").ask_async()
+                    return retry
 
         except Exception as e:
-            console.print(f"[red]Error during project setup: {str(e)}[/red]")
-            logging.exception("Project setup failed")
-            return True
+            self.stop_progress()
+            console.print(f"[red]Error:[/red] {str(e)}")
+            return False
+
+        finally:
+            if self.agent and self.agent.progress_tracker:
+                self.agent.progress_tracker.unregister_callback(progress_callback)
+            self.stop_progress()
 
     async def handle_build_project(self) -> bool:
         """Handle project building/updating"""
@@ -437,15 +415,30 @@ class CLIManager:
         console.print(status_panel)
         return True
 
+    def log_info(self, message: str) -> None:
+        """Log info message with clean formatting"""
+        logger.info(f"[blue]•[/blue] {message}")
+
+    def log_error(self, message: str) -> None:
+        """Log error message with clean formatting"""
+        logger.error(f"[red]✗[/red] {message}")
+
+    def log_success(self, message: str) -> None:
+        """Log success message with clean formatting"""
+        logger.info(f"[green]✓[/green] {message}")
+
+    def log_warning(self, message: str) -> None:
+        """Log warning message with clean formatting"""
+        logger.warning(f"[yellow]![/yellow] {message}")
+
     async def display_main_menu(self) -> bool:
-        """Display the main menu and handle selection"""
+        """Display the main menu"""
+        self.display_welcome()
+        
         try:
-            answer = await questionary.select(
+            choice = await questionary.select(
                 "Select an option:",
-                choices=[
-                    *list(self.main_menu_items.keys()),
-                    questionary.Choice("Cancel", "cancel")
-                ],
+                choices=list(self.main_menu_items.keys()),
                 style=Style([
                     ('qmark', 'fg:cyan bold'),
                     ('question', 'bold'),
@@ -454,30 +447,24 @@ class CLIManager:
                     ('highlighted', 'fg:cyan bold'),
                 ])
             ).ask_async()
-            
-            if answer == "Cancel":
+
+            if choice == "👋 Exit":
                 return False
-                
-            if answer:
-                action = self.main_menu_items[answer]
-                if asyncio.iscoroutinefunction(action):
-                    return await action()
-                return action()
-            return True
+
+            handler = self.main_menu_items[choice]
+            return await handler()
+
         except Exception as e:
-            console.print(f"[red]Error in menu: {str(e)}[/red]")
-            logging.exception("Menu error")
-            return True
+            self.log_error(f"An error occurred: {str(e)}")
+            return False
 
     async def start(self) -> None:
         """Start the CLI interface"""
-        self.display_welcome()
-        
         while True:
             try:
                 should_continue = await self.display_main_menu()
                 if not should_continue:
-                    console.print("[yellow]👋 Goodbye![/yellow]")
+                    console.print("👋 Goodbye!")
                     break
             except KeyboardInterrupt:
                 console.print("\n[yellow]Use 'Exit' option to quit.[/yellow]")
@@ -498,20 +485,7 @@ async def run_cli(debug: bool = False, output_dir: str = "./projects"):
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
     cli_manager = CLIManager()
-    cli_manager.display_welcome()
-    
-    while True:
-        try:
-            should_continue = await cli_manager.display_main_menu()
-            if not should_continue:
-                console.print("[yellow]👋 Goodbye![/yellow]")
-                break
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Use 'Exit' option to quit.[/yellow]")
-        except Exception as e:
-            console.print(f"[red]Error: {str(e)}[/red]")
-            if debug:
-                logging.exception("Error in main menu")
+    await cli_manager.start()
 
 @click.command()
 @click.option('--debug', is_flag=True, help='Enable debug logging')

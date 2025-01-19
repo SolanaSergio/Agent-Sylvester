@@ -6,6 +6,10 @@ import json
 import shutil
 import logging
 from src.utils.types import ProjectConfig
+import os
+from src.utils.api_manager import APIManager
+import aiohttp
+import re
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -16,6 +20,7 @@ class ProjectBuilder:
     def __init__(self):
         self.config: Optional[ProjectConfig] = None
         self.requirements: Dict = {}
+        self.api_manager = APIManager()
 
     async def initialize_project(self, config: ProjectConfig, requirements: dict, project_path: Path) -> None:
         """Initialize a new project with the given configuration"""
@@ -23,53 +28,75 @@ class ProjectBuilder:
             # Create project structure based on requirements
             structure = requirements.get('structure', {})
             
-            # Create src directory and its subdirectories
-            if 'src' in structure:
-                src_dir = project_path / 'src'
-                src_dir.mkdir(exist_ok=True)
-                
-                # Create component directories
-                if 'components' in structure['src']:
-                    components_dir = src_dir / 'components'
-                    components_dir.mkdir(exist_ok=True)
-                    
-                    # Create component subdirectories
-                    for component_type in structure['src']['components']:
-                        (components_dir / component_type).mkdir(exist_ok=True)
-                
-                # Create other src subdirectories
-                for dirname in ['pages', 'styles', 'utils', 'hooks', 'services', 'types']:
-                    if structure['src'].get(dirname, False):
-                        (src_dir / dirname).mkdir(exist_ok=True)
+            # Create base directories
+            src_dir = project_path / 'src'
+            src_dir.mkdir(exist_ok=True)
             
-            # Create public directory
-            if structure.get('public', False):
-                (project_path / 'public').mkdir(exist_ok=True)
+            # Create essential directories first
+            essential_dirs = {
+                'hooks': src_dir / 'hooks',
+                'contexts': src_dir / 'contexts',
+                'components': src_dir / 'components',
+                'pages': src_dir / 'pages',
+                'styles': src_dir / 'styles'
+            }
             
-            # Create docs directory
-            if structure.get('docs', False):
-                (project_path / 'docs').mkdir(exist_ok=True)
+            for dir_name, dir_path in essential_dirs.items():
+                dir_path.mkdir(exist_ok=True)
+                logger.info(f"Created directory: {dir_path}")
             
-            # Create tests directory
-            if structure.get('tests', False):
-                (project_path / 'tests').mkdir(exist_ok=True)
-            
-            # Create configuration files
+            # Create configuration files first
             if 'configurations' in requirements:
                 await self._create_config_files(project_path, config, requirements)
+                logger.info("Created configuration files")
             
             # Create package.json
             await self._create_package_json(project_path, config, requirements)
+            logger.info("Created package.json")
             
             # Create README.md
             await self._create_readme(project_path, config)
+            logger.info("Created README.md")
             
-            # Create source files
+            # Create core functionality first
+            await self._create_auth_hook(project_path)
+            logger.info("Created authentication hook")
+            
+            await self._create_theme_context(project_path)
+            logger.info("Created theme context")
+            
+            # Verify core dependencies exist before creating components
+            auth_hook_path = essential_dirs['hooks'] / 'useAuth.tsx'
+            theme_context_path = essential_dirs['contexts'] / 'ThemeContext.tsx'
+            
+            if not auth_hook_path.exists() or not theme_context_path.exists():
+                raise ValueError("Core dependencies missing. Failed to create auth hook or theme context.")
+            
+            # Now create components that depend on the core functionality
             await self._create_source_files(project_path, config)
+            logger.info("Created source files and components")
+            
+            # Create additional directories if specified
+            if structure.get('public', False):
+                (project_path / 'public').mkdir(exist_ok=True)
+            
+            if structure.get('docs', False):
+                (project_path / 'docs').mkdir(exist_ok=True)
+            
+            if structure.get('tests', False):
+                (project_path / 'tests').mkdir(exist_ok=True)
+            
+            logger.info("Project initialization completed successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize project structure: {str(e)}")
-            raise ValueError(f"Failed to initialize project structure: {str(e)}")
+            # Add more context to the error
+            if "useAuth" in str(e):
+                raise ValueError("Failed to initialize project: Authentication hook not properly created")
+            elif "ThemeContext" in str(e):
+                raise ValueError("Failed to initialize project: Theme context not properly created")
+            else:
+                raise ValueError(f"Failed to initialize project structure: {str(e)}")
 
     async def _create_config_files(self, project_path: Path, config: ProjectConfig, requirements: dict) -> None:
         """Create configuration files for the project"""
@@ -186,22 +213,58 @@ module.exports = nextConfig
 
     async def _create_package_json(self, project_path: Path, config: ProjectConfig, requirements: dict) -> None:
         """Create package.json file"""
+        # Define core dependencies based on project type
+        core_dependencies = {
+            "next": "^14.0.0",
+            "react": "^18.2.0",
+            "react-dom": "^18.2.0"
+        }
+        
+        # Define core dev dependencies
+        core_dev_dependencies = {
+            "typescript": "^5.0.0",
+            "@types/node": "^20.0.0",
+            "@types/react": "^18.2.0",
+            "@types/react-dom": "^18.2.0",
+            "eslint": "^8.0.0",
+            "eslint-config-next": "^14.0.0"
+        }
+        
+        # Add styling dependencies based on config
+        if config.styling == "tailwind":
+            core_dependencies.update({
+                "tailwindcss": "^3.3.0",
+                "autoprefixer": "^10.0.0",
+                "postcss": "^8.0.0"
+            })
+        elif config.styling == "styled-components":
+            core_dependencies["styled-components"] = "^6.0.0"
+            core_dev_dependencies["@types/styled-components"] = "^6.0.0"
+        
+        # Handle additional dependencies from requirements
+        if 'dependencies' in requirements:
+            core_dependencies.update(requirements['dependencies'])
+                
+        if 'devDependencies' in requirements:
+            core_dev_dependencies.update(requirements['devDependencies'])
+        
         package_json = {
             "name": config.name,
             "version": "0.1.0",
             "private": True,
-            "scripts": requirements.get('scripts', {
+            "scripts": {
                 "dev": "next dev",
                 "build": "next build",
                 "start": "next start",
                 "lint": "next lint"
-            }),
-            "dependencies": requirements.get('dependencies', {}),
-            "devDependencies": requirements.get('devDependencies', {})
+            },
+            "dependencies": core_dependencies,
+            "devDependencies": core_dev_dependencies
         }
         
+        # Write package.json with proper JSON formatting
         with open(project_path / 'package.json', 'w', encoding='utf-8') as f:
-            json.dump(package_json, f, indent=2)
+            json.dump(package_json, f, indent=2, ensure_ascii=False)
 
     async def _create_readme(self, project_path: Path, config: ProjectConfig) -> None:
         """Create README.md file"""
@@ -244,563 +307,683 @@ To learn more about the technologies used in this project, take a look at the fo
         with open(project_path / 'README.md', 'w', encoding='utf-8') as f:
             f.write(readme_content) 
 
-    async def _create_source_files(self, project_path: Path, config: ProjectConfig) -> None:
-        """Create source files for the project"""
-        src_dir = project_path / "src"
-        src_dir.mkdir(exist_ok=True)
-        
-        # Create types directory and base types
-        types_dir = src_dir / "types"
-        types_dir.mkdir(exist_ok=True)
-        
-        # Create base types
-        base_types = """// Common types used across the application
-export interface User {
-  id: string;
-  name: string;
-  email: string;
-  image?: string;
-  role: 'user' | 'admin';
-}
-
-export interface ApiResponse<T = any> {
-  data?: T;
-  error?: string;
-  status: 'success' | 'error';
-}
-
-export interface PaginatedResponse<T> extends ApiResponse<T[]> {
-  total: number;
-  page: number;
-  pageSize: number;
-}
-
-export interface Theme {
-  mode: 'light' | 'dark';
-  primary: string;
-  secondary: string;
-  background: string;
-  text: string;
-}
-"""
-        with open(types_dir / "index.ts", 'w') as f:
-            f.write(base_types)
-        
-        # Create utils directory with helper functions
-        utils_dir = src_dir / "utils"
-        utils_dir.mkdir(exist_ok=True)
-        
-        # API client utility
-        api_client = """import axios from 'axios';
-import { ApiResponse } from '@/types';
-
-const apiClient = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
-
-// Request interceptor for authentication
-apiClient.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token');
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
-  return config;
-});
-
-// Response interceptor for error handling
-apiClient.interceptors.response.use(
-  (response) => response,
-  async (error) => {
-    if (error.response?.status === 401) {
-      // Handle unauthorized access
-      localStorage.removeItem('token');
-      window.location.href = '/login';
-    }
-    return Promise.reject(error);
-  }
-);
-
-export const api = {
-  get: async <T>(url: string): Promise<ApiResponse<T>> => {
-    try {
-      const response = await apiClient.get<ApiResponse<T>>(url);
-      return response.data;
-    } catch (error) {
-      return { status: 'error', error: error.message };
-    }
-  },
-  
-  post: async <T>(url: string, data: any): Promise<ApiResponse<T>> => {
-    try {
-      const response = await apiClient.post<ApiResponse<T>>(url, data);
-      return response.data;
-    } catch (error) {
-      return { status: 'error', error: error.message };
-    }
-  },
-  
-  // Add other methods as needed
-};
-
-export default api;
-"""
-        with open(utils_dir / "api.ts", 'w') as f:
-            f.write(api_client)
-        
-        # Create hooks directory with custom hooks
-        hooks_dir = src_dir / "hooks"
-        hooks_dir.mkdir(exist_ok=True)
-        
-        use_auth = """import { useState, useEffect } from 'react';
-import { User } from '@/types';
-import api from '@/utils/api';
-
-export function useAuth() {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    checkAuth();
-  }, []);
-
-  const checkAuth = async () => {
-    try {
-      const response = await api.get<User>('/api/auth/user');
-      if (response.status === 'success' && response.data) {
-        setUser(response.data);
-      }
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const login = async (email: string, password: string) => {
-    try {
-      const response = await api.post<{ token: string; user: User }>('/api/auth/login', {
-        email,
-        password,
-      });
-      
-      if (response.status === 'success' && response.data) {
-        localStorage.setItem('token', response.data.token);
-        setUser(response.data.user);
-      }
-      
-      return response;
-    } catch (err) {
-      setError(err.message);
-      throw err;
-    }
-  };
-
-  const logout = () => {
-    localStorage.removeItem('token');
-    setUser(null);
-  };
-
-  return { user, loading, error, login, logout };
-}
-"""
-        with open(hooks_dir / "useAuth.ts", 'w') as f:
-            f.write(use_auth)
-        
-        # Create components with proper structure
-        components_dir = src_dir / "components"
-        components_dir.mkdir(exist_ok=True)
-        
-        # Layout components
-        layout_dir = components_dir / "layout"
-        layout_dir.mkdir(exist_ok=True)
-        
-        layout_component = """import { ReactNode } from 'react';
-import { Navbar } from './Navbar';
-import { Footer } from './Footer';
-
-interface LayoutProps {
-  children: ReactNode;
-}
-
-export function Layout({ children }: LayoutProps) {
-  return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-      <Navbar />
-      <main className="container mx-auto px-4 py-8">
-        {children}
-      </main>
-      <Footer />
-    </div>
-  );
-}
-"""
-        with open(layout_dir / "Layout.tsx", 'w') as f:
-            f.write(layout_component)
-        
-        # Create Navbar component
-        navbar_component = """import Link from 'next/link';
-import { useAuth } from '@/hooks/useAuth';
-import { useTheme } from '@/contexts/ThemeContext';
-
-export function Navbar() {
-  const { user, logout } = useAuth();
-  const { theme, toggleTheme } = useTheme();
-
-  return (
-    <nav className="bg-white dark:bg-gray-800 shadow-md">
-      <div className="container mx-auto px-4">
-        <div className="flex justify-between items-center h-16">
-          <Link href="/" className="text-xl font-bold text-gray-800 dark:text-white">
-            {config.name}
-          </Link>
-          
-          <div className="flex items-center space-x-4">
-            <button
-              onClick={toggleTheme}
-              className="p-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700"
-              aria-label="Toggle theme"
-            >
-              {theme.mode === 'light' ? 'Dark' : 'Light'}
-            </button>
-            
-            {user ? (
-              <div className="flex items-center space-x-4">
-                <span className="text-gray-600 dark:text-gray-300">{user.name}</span>
-                <button
-                  onClick={logout}
-                  className="btn-secondary"
-                >
-                  Logout
-                </button>
-              </div>
-            ) : (
-              <Link href="/login" className="btn-primary">
-                Login
-              </Link>
-            )}
-          </div>
-        </div>
-      </div>
-    </nav>
-  );
-}
-"""
-        with open(layout_dir / "Navbar.tsx", 'w', encoding='utf-8') as f:
-            f.write(navbar_component)
-
-        # Create Footer component
-        footer_component = """export function Footer() {
-  return (
-    <footer className="bg-white dark:bg-gray-800 shadow-md mt-8">
-      <div className="container mx-auto px-4 py-6">
-        <div className="flex justify-between items-center">
-          <p className="text-gray-600 dark:text-gray-300">
-            © {new Date().getFullYear()} {config.name}. All rights reserved.
-          </p>
-          <div className="flex space-x-4">
-            <a
-              href="https://github.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white"
-            >
-              GitHub
-            </a>
-            <a
-              href="/docs"
-              className="text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white"
-            >
-              Documentation
-            </a>
-          </div>
-        </div>
-      </div>
-    </footer>
-  );
-}
-"""
-        with open(layout_dir / "Footer.tsx", 'w', encoding='utf-8') as f:
-            f.write(footer_component)
-
-        # Create pages directory and files
-        pages_dir = src_dir / "pages"
-        pages_dir.mkdir(exist_ok=True)
-        
-        # Enhanced _app.tsx with proper setup
-        app_content = """import '@/styles/globals.css';
-import type { AppProps } from 'next/app';
-import { Layout } from '@/components/layout/Layout';
+    def _get_app_layout_content(self, config: ProjectConfig) -> str:
+        """Get content for app layout (_app.tsx)"""
+        return """import type { AppProps } from 'next/app';
+import { AuthProvider } from '@/hooks/useAuth';
 import { ThemeProvider } from '@/contexts/ThemeContext';
-import { AuthProvider } from '@/contexts/AuthContext';
+import '@/styles/globals.css';
 
 export default function App({ Component, pageProps }: AppProps) {
   return (
-    <ThemeProvider>
-      <AuthProvider>
-        <Layout>
-          <Component {...pageProps} />
-        </Layout>
-      </AuthProvider>
-    </ThemeProvider>
+    <AuthProvider>
+      <ThemeProvider>
+        <Component {...pageProps} />
+      </ThemeProvider>
+    </AuthProvider>
   );
 }
 """
-        with open(pages_dir / "_app.tsx", 'w') as f:
-            f.write(app_content)
-        
-        # Enhanced index page
-        index_content = """import { NextPage } from 'next';
-import Head from 'next/head';
-import { useAuth } from '@/hooks/useAuth';
-import styles from '@/styles/Home.module.css';
 
-const Home: NextPage = () => {
-  const { user } = useAuth();
+    async def _create_source_files(self, project_path: Path, config: ProjectConfig) -> None:
+        """Create initial source files for the project with custom code based on requirements."""
+        try:
+            # Extract key features from config description
+            description = config.description.lower()
+            features = await self._analyze_requirements(description)
+            
+            # Create hooks directory
+            hooks_dir = project_path / 'src' / 'hooks'
+            hooks_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create custom hooks based on features
+            for feature, details in features.items():
+                if details['detected']:
+                    await self._create_feature_hook(hooks_dir, feature, details['requirements'])
+            
+            # Create contexts directory
+            contexts_dir = project_path / 'src' / 'contexts'
+            contexts_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create custom contexts based on features
+            for feature, details in features.items():
+                if details['detected']:
+                    await self._create_feature_context(contexts_dir, feature, details['requirements'])
+            
+            # Create components directory
+            components_dir = project_path / 'src' / 'components'
+            components_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create custom components based on features
+            for feature, details in features.items():
+                if details['detected']:
+                    await self._create_component(
+                        name=feature,
+                        requirements=details['requirements'],
+                        component_dir=components_dir
+                    )
+            
+            # Create pages directory
+            pages_dir = project_path / 'src' / 'pages'
+            pages_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create custom pages based on features
+            await self._create_index_page(pages_dir, features)
+            await self._create_playlist_pages(pages_dir)
+            await self._create_visualizer_page(pages_dir)
+            
+            logger.info("Created custom source files based on project requirements")
+            
+        except Exception as e:
+            logger.error(f"Failed to create source files: {str(e)}")
+            raise
+
+    async def _analyze_requirements(self, description: str) -> dict:
+        """Analyze project requirements from description."""
+        features = {
+            'audio': {
+                'detected': any(word in description.lower() for word in ['audio', 'music', 'sound', 'player']),
+                'requirements': []
+            },
+            'playlist': {
+                'detected': 'playlist' in description.lower(),
+                'requirements': []
+            },
+            'visualization': {
+                'detected': any(word in description.lower() for word in ['visualization', 'visualizer', 'visual']),
+                'requirements': []
+            }
+        }
+
+        # Analyze specific requirements for each feature
+        if features['audio']['detected']:
+            if 'streaming' in description.lower():
+                features['audio']['requirements'].append('streaming')
+            if 'upload' in description.lower():
+                features['audio']['requirements'].append('file_upload')
+            if 'format' in description.lower():
+                features['audio']['requirements'].append('format_conversion')
+
+        if features['playlist']['detected']:
+            if 'share' in description.lower():
+                features['playlist']['requirements'].append('sharing')
+            if 'collaborate' in description.lower():
+                features['playlist']['requirements'].append('collaboration')
+            if 'import' in description.lower():
+                features['playlist']['requirements'].append('import')
+
+        if features['visualization']['detected']:
+            if 'spectrum' in description.lower():
+                features['visualization']['requirements'].append('spectrum')
+            if '3d' in description.lower():
+                features['visualization']['requirements'].append('3d')
+            if 'waveform' in description.lower():
+                features['visualization']['requirements'].append('waveform')
+
+        return features
+
+    async def _create_feature_hook(self, hooks_dir: Path, feature: str, requirements: List[str]) -> None:
+        """Create custom hook for a specific feature with dynamic implementation."""
+        hook_name = f"use{feature.capitalize()}"
+        imports = ['import { useState, useEffect }']
+        state_vars = []
+        effects = []
+        methods = []
+        
+        # Dynamically build hook based on requirements
+        for req in requirements:
+            hook_details = self._get_hook_implementation(feature, req)
+            imports.extend(hook_details.get('imports', []))
+            state_vars.extend(hook_details.get('state', []))
+            effects.extend(hook_details.get('effects', []))
+            methods.extend(hook_details.get('methods', []))
+
+        # Generate hook content
+        hook_content = self._generate_hook_content(
+            hook_name=hook_name,
+            imports=imports,
+            state_vars=state_vars,
+            effects=effects,
+            methods=methods
+        )
+
+        await self._write_file(
+            os.path.join(hooks_dir, f"{hook_name}.ts"),
+            hook_content
+        )
+        logger.info(f"Created {hook_name} hook")
+
+    def _get_hook_implementation(self, feature: str, requirement: str) -> dict:
+        """Get specific implementation details for a hook based on feature and requirement."""
+        implementations = {
+            'audio': {
+                'streaming': {
+                    'imports': ['import { useMediaStream } from "@/utils/media"'],
+                    'state': [
+                        'const [stream, setStream] = useState<MediaStream | null>(null)',
+                        'const [error, setError] = useState<string | null>(null)'
+                    ],
+                    'effects': [
+                        '''useEffect(() => {
+                            const initStream = async () => {
+                                try {
+                                    const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                                    setStream(mediaStream);
+                                } catch (err) {
+                                    setError(err.message);
+                                }
+                            };
+                            initStream();
+                            return () => stream?.getTracks().forEach(track => track.stop());
+                        }, [])'''
+                    ],
+                    'methods': []
+                },
+                'file_upload': {
+                    'imports': ['import { uploadFile } from "@/utils/upload"'],
+                    'state': ['const [progress, setProgress] = useState(0)'],
+                    'methods': [
+                        '''const handleUpload = async (file: File) => {
+                            try {
+                                await uploadFile(file, (progress) => setProgress(progress));
+                                return true;
+                            } catch (err) {
+                                setError(err.message);
+                                return false;
+                            }
+                        }'''
+                    ]
+                }
+            },
+            'playlist': {
+                'sharing': {
+                    'imports': ['import { sharePlaylist } from "@/utils/share"'],
+                    'methods': [
+                        '''const shareWithUsers = async (playlistId: string, userIds: string[]) => {
+                            try {
+                                await sharePlaylist(playlistId, userIds);
+                                return true;
+                            } catch (err) {
+                                console.error(err);
+                                return false;
+                            }
+                        }'''
+                    ]
+                }
+            }
+            # Add more implementations as needed
+        }
+        
+        return implementations.get(feature, {}).get(requirement, {})
+
+    def _generate_hook_content(self, hook_name: str, imports: List[str], 
+                             state_vars: List[str], effects: List[str], 
+                             methods: List[str]) -> str:
+        """Generate the complete hook content."""
+        return f"""// Generated {hook_name} hook
+{chr(10).join(imports)}
+
+export function {hook_name}() {{
+    {chr(10).join(state_vars)}
+    
+    {chr(10).join(effects)}
+    
+    {chr(10).join(methods)}
+    
+    return {{
+        {', '.join(self._extract_return_values(state_vars, methods))}
+    }};
+}}
+"""
+
+    def _extract_return_values(self, state_vars: List[str], methods: List[str]) -> List[str]:
+        """Extract return values from state variables and methods."""
+        return_values = []
+        
+        # Extract from state vars
+        for var in state_vars:
+            if 'useState' in var:
+                var_name = var.split('[')[1].split(',')[0].strip()
+                return_values.append(var_name)
+        
+        # Extract from methods
+        for method in methods:
+            if 'const' in method:
+                method_name = method.split('const')[1].split('=')[0].strip()
+                return_values.append(method_name)
+        
+        return return_values
+
+    async def _create_feature_context(self, contexts_dir: Path, feature: str, requirements: List[str]) -> None:
+        """Create custom context for a specific feature."""
+        context_name = f"{feature.title()}Context"
+        imports = ['import React, { createContext, useContext, useState, useCallback }']
+        state_vars = []
+        methods = []
+        
+        # Add feature-specific state and methods
+        if feature == 'playlist':
+            state_vars.append('const [playlists, setPlaylists] = useState<Playlist[]>([])')
+            methods.extend([
+                'const createPlaylist = useCallback((name: string) => {',
+                '    const newPlaylist = { id: Date.now(), name, tracks: [] }',
+                '    setPlaylists(prev => [...prev, newPlaylist])',
+                '    return newPlaylist',
+                '}, [])',
+                '',
+                'const addTrackToPlaylist = useCallback((playlistId: number, track: Track) => {',
+                '    setPlaylists(prev => prev.map(playlist => {',
+                '        if (playlist.id === playlistId) {',
+                '            return { ...playlist, tracks: [...playlist.tracks, track] }',
+                '        }',
+                '        return playlist',
+                '    }))',
+                '}, [])'
+            ])
+            
+        elif feature == 'theme':
+            state_vars.append('const [theme, setTheme] = useState<Theme>("light")')
+            methods.extend([
+                'const toggleTheme = useCallback(() => {',
+                '    setTheme(prev => prev === "light" ? "dark" : "light")',
+                '}, [])'
+            ])
+            
+        elif feature == 'auth':
+            imports.append('import { User } from "@/types"')
+            state_vars.extend([
+                'const [user, setUser] = useState<User | null>(null)',
+                'const [loading, setLoading] = useState(true)'
+            ])
+            methods.extend([
+                'const login = useCallback(async (credentials: LoginCredentials) => {',
+                '    setLoading(true)',
+                '    try {',
+                '        const user = await authService.login(credentials)',
+                '        setUser(user)',
+                '        return user',
+                '    } finally {',
+                '        setLoading(false)',
+                '    }',
+                '}, [])',
+                '',
+                'const logout = useCallback(async () => {',
+                '    await authService.logout()',
+                '    setUser(null)',
+                '}, [])'
+            ])
+            
+        # Generate context file content
+        context_content = self._generate_context_content(
+            context_name=context_name,
+            imports=imports,
+            state_vars=state_vars,
+            methods=methods
+        )
+        
+        # Write context file
+        context_file = contexts_dir / f"{feature.lower()}_context.tsx"
+        await self._write_file(str(context_file), context_content)
+
+    async def _create_component(self, name: str, requirements: list, component_dir: Path) -> None:
+        """Create a component based on specific requirements."""
+        imports = ['import React']
+        hooks = []
+        props = []
+        state = []
+        effects = []
+        jsx = []
+        
+        # Build component based on requirements
+        for req in requirements:
+            if req == 'streaming':
+                imports.append('import { useAudioStream } from "@/hooks/useAudioStream"')
+                hooks.append('const { stream, error } = useAudioStream()')
+                jsx.append(self._generate_streaming_player())
+            elif req == 'file_upload':
+                imports.append('import { useFileUpload } from "@/hooks/useFileUpload"')
+                hooks.append('const { uploadFile, progress } = useFileUpload()')
+                jsx.append(self._generate_upload_interface())
+            elif req == 'visualization':
+                imports.append('import { useVisualizer } from "@/hooks/useVisualizer"')
+                imports.append('import { Canvas } from "@/components/Canvas"')
+                hooks.append('const { audioData, isPlaying } = useVisualizer()')
+                jsx.append('''
+                    <div className="visualizer-container">
+                        <Canvas audioData={audioData} isPlaying={isPlaying} />
+                    </div>
+                '''.strip())
+            elif req == 'playlist':
+                imports.append('import { usePlaylist } from "@/hooks/usePlaylist"')
+                imports.append('import { PlaylistItem } from "@/components/PlaylistItem"')
+                hooks.append('const { playlists, currentTrack, addToPlaylist, removeFromPlaylist } = usePlaylist()')
+                state.append('const [selectedPlaylist, setSelectedPlaylist] = useState<string | null>(null)')
+                jsx.append('''
+                    <div className="playlist-container">
+                        {playlists.map(playlist => (
+                            <PlaylistItem
+                                key={playlist.id}
+                                playlist={playlist}
+                                currentTrack={currentTrack}
+                                onAdd={addToPlaylist}
+                                onRemove={removeFromPlaylist}
+                                selected={selectedPlaylist === playlist.id}
+                                onSelect={() => setSelectedPlaylist(playlist.id)}
+                            />
+                        ))}
+                    </div>
+                '''.strip())
+
+        # Generate the initial component
+        component_content = self._generate_component_content(
+            name=name,
+            imports=imports,
+            hooks=hooks,
+            props=props,
+            state=state,
+            effects=effects,
+            jsx=jsx
+        )
+
+        # Try to enhance the component with scraped template
+        enhanced_content = await self._enhance_component_with_template(
+            name=name,
+            requirements=requirements,
+            base_content=component_content
+        )
+
+        # Write the final component
+        await self._write_file(
+            os.path.join(component_dir, f"{name}.tsx"),
+            enhanced_content
+        )
+
+    async def _create_index_page(self, pages_dir: Path, features: dict) -> None:
+        """Create index page based on project features."""
+        imports = ['import React from "react"']
+        components = []
+        
+        # Add feature-specific components
+        if 'playlist' in features:
+            imports.append('import { PlaylistGrid } from "@/components/playlist/PlaylistGrid"')
+            components.append('<PlaylistGrid />')
+            
+        if 'visualizer' in features:
+            imports.append('import { Visualizer } from "@/components/visualizer/Visualizer"')
+            components.append('<Visualizer />')
+            
+        if 'upload' in features:
+            imports.append('import { UploadZone } from "@/components/upload/UploadZone"')
+            components.append('<UploadZone />')
+            
+        # Generate page content
+        page_content = f"""
+{self._format_imports(imports)}
+
+export default function Home() {{
+    return (
+        <main className="flex min-h-screen flex-col items-center justify-between p-24">
+            <div className="z-10 w-full max-w-5xl items-center justify-between font-mono text-sm">
+                {' '.join(components)}
+            </div>
+        </main>
+    )
+}}
+"""
+        
+        # Write page file
+        page_file = pages_dir / "index.tsx"
+        await self._write_file(str(page_file), page_content)
+
+    async def _create_playlist_pages(self, pages_dir: Path) -> None:
+        """Create playlist-related pages."""
+        # Create playlists index page
+        playlists_dir = pages_dir / "playlists"
+        playlists_dir.mkdir(exist_ok=True)
+        
+        index_content = """
+import React from 'react'
+import { PlaylistGrid } from '@/components/playlist/PlaylistGrid'
+import { CreatePlaylistButton } from '@/components/playlist/CreatePlaylistButton'
+
+export default function PlaylistsPage() {
+    return (
+        <div className="container mx-auto px-4 py-8">
+            <div className="flex justify-between items-center mb-8">
+                <h1 className="text-3xl font-bold">Your Playlists</h1>
+                <CreatePlaylistButton />
+            </div>
+            <PlaylistGrid />
+        </div>
+    )
+}
+"""
+        await self._write_file(str(playlists_dir / "index.tsx"), index_content)
+        
+        # Create dynamic playlist page
+        playlist_content = """
+import React from 'react'
+import { useRouter } from 'next/router'
+import { usePlaylist } from '@/hooks/usePlaylist'
+import { PlaylistDetails } from '@/components/playlist/PlaylistDetails'
+import { TrackList } from '@/components/playlist/TrackList'
+
+export default function PlaylistPage() {
+    const router = useRouter()
+    const { id } = router.query
+    const { playlist, loading, error } = usePlaylist(id as string)
+    
+    if (loading) return <div>Loading...</div>
+    if (error) return <div>Error: {error}</div>
+    if (!playlist) return <div>Playlist not found</div>
+    
+    return (
+        <div className="container mx-auto px-4 py-8">
+            <PlaylistDetails playlist={playlist} />
+            <TrackList tracks={playlist.tracks} />
+        </div>
+    )
+}
+"""
+        await self._write_file(str(playlists_dir / "[id].tsx"), playlist_content)
+
+    async def _create_visualizer_page(self, pages_dir: Path) -> None:
+        """Create visualizer page."""
+        visualizer_dir = pages_dir / "visualizer"
+        visualizer_dir.mkdir(exist_ok=True)
+        
+        page_content = """
+import React from 'react'
+import { AudioVisualizer } from '@/components/visualizer/AudioVisualizer'
+import { VisualizerControls } from '@/components/visualizer/VisualizerControls'
+import { useAudioContext } from '@/hooks/useAudioContext'
+
+export default function VisualizerPage() {
+    const { audioContext, analyser } = useAudioContext()
+    
+    return (
+        <div className="container mx-auto px-4 py-8">
+            <h1 className="text-3xl font-bold mb-8">Audio Visualizer</h1>
+            <div className="grid grid-cols-1 gap-8">
+                <AudioVisualizer analyser={analyser} />
+                <VisualizerControls audioContext={audioContext} />
+            </div>
+        </div>
+    )
+}
+"""
+        await self._write_file(str(visualizer_dir / "index.tsx"), page_content)
+
+    def _generate_context_content(self, context_name: str, imports: List[str], state_vars: List[str], methods: List[str]) -> str:
+        """Generate context file content"""
+        # Extract state and method names for context value
+        state_names = []
+        method_names = []
+        
+        for var in state_vars:
+            if 'useState' in var:
+                name = var.split('[')[1].split(',')[0].strip()
+                state_names.append(name)
+                
+        for method in methods:
+            if 'const' in method and '=' in method:
+                name = method.split('const')[1].split('=')[0].strip()
+                method_names.append(name)
+                
+        # Generate context value type
+        value_type = ', '.join([
+            *[f"{name}: {name.title()}" for name in state_names],
+            *[f"{name}: {name.title()}" for name in method_names]
+        ])
+        
+        return f"""
+{self._format_imports(imports)}
+
+type {context_name}Type = {{
+    {value_type}
+}}
+
+const {context_name} = createContext<{context_name}Type | undefined>(undefined)
+
+export function {context_name}Provider({{ children }}: {{ children: React.ReactNode }}) {{
+    {self._format_content(state_vars)}
+    
+    {self._format_content(methods)}
+    
+    const value = {{
+        {', '.join([*state_names, *method_names])}
+    }}
+    
+    return (
+        <{context_name}.Provider value={{value}}>
+            {{children}}
+        </{context_name}.Provider>
+    )
+}}
+
+export function use{context_name}() {{
+    const context = useContext({context_name})
+    if (context === undefined) {{
+        throw new Error('use{context_name} must be used within a {context_name}Provider')
+    }}
+    return context
+}}
+"""
+
+    def _format_imports(self, imports: List[str]) -> str:
+        """Format import statements."""
+        # Remove duplicates and sort
+        unique_imports = sorted(set(imports))
+        
+        # Group imports by type
+        react_imports = []
+        next_imports = []
+        hook_imports = []
+        component_imports = []
+        other_imports = []
+        
+        for imp in unique_imports:
+            if 'react' in imp.lower():
+                react_imports.append(imp)
+            elif 'next' in imp.lower():
+                next_imports.append(imp)
+            elif '/hooks/' in imp:
+                hook_imports.append(imp)
+            elif '/components/' in imp:
+                component_imports.append(imp)
+            else:
+                other_imports.append(imp)
+        
+        # Join all groups with newlines between them
+        formatted = []
+        if react_imports:
+            formatted.extend(react_imports)
+        if next_imports:
+            if formatted: formatted.append('')
+            formatted.extend(next_imports)
+        if hook_imports:
+            if formatted: formatted.append('')
+            formatted.extend(hook_imports)
+        if component_imports:
+            if formatted: formatted.append('')
+            formatted.extend(component_imports)
+        if other_imports:
+            if formatted: formatted.append('')
+            formatted.extend(other_imports)
+            
+        return '\n'.join(formatted)
+        
+    def _format_content(self, lines: List[str]) -> str:
+        """Format content lines with proper indentation"""
+        return '\n    '.join(lines)
+
+    async def _create_auth_hook(self, project_path: Path) -> None:
+        """Create authentication hook and context"""
+        hooks_dir = project_path / 'src' / 'hooks'
+        hooks_dir.mkdir(exist_ok=True)
+        
+        auth_hook_content = """import { createContext, useContext, useState, useEffect } from 'react';
+
+type User = {
+  id: string;
+  name: string;
+  email: string;
+} | null;
+
+type AuthContextType = {
+  user: User;
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => void;
+};
+
+const AuthContext = createContext<AuthContextType>({} as AuthContextType);
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<User>(null);
+
+  const login = async (email: string, password: string) => {
+    // Implement your login logic here
+    setUser({ id: '1', name: 'User', email });
+  };
+
+  const logout = () => {
+    setUser(null);
+  };
 
   return (
-    <>
-      <Head>
-        <title>{config.name}</title>
-        <meta name="description" content="Generated by Auto Agent" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="icon" href="/favicon.ico" />
-      </Head>
-      <main className={styles.main}>
-        <h1 className="text-4xl font-bold mb-8">
-          Welcome to {config.name}
-          {user && <span className="text-2xl ml-2">👋 {user.name}</span>}
-        </h1>
-        
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {/* Add your content here */}
-        </div>
-      </main>
-    </>
+    <AuthContext.Provider value={{ user, login, logout }}>
+      {children}
+    </AuthContext.Provider>
   );
-};
+}
 
-export default Home;
+export const useAuth = () => useContext(AuthContext);
 """
-        with open(pages_dir / "index.tsx", 'w') as f:
-            f.write(index_content)
         
-        # Create API routes with proper error handling
-        api_dir = pages_dir / "api"
-        api_dir.mkdir(exist_ok=True)
-        
-        # Add more sophisticated API endpoint
-        api_utils = """import { NextApiRequest, NextApiResponse } from 'next';
-import { ApiResponse } from '@/types';
+        auth_hook_path = hooks_dir / 'useAuth.tsx'
+        auth_hook_path.write_text(auth_hook_content)
 
-export function withErrorHandler(
-  handler: (req: NextApiRequest, res: NextApiResponse<ApiResponse>) => Promise<void>
-) {
-  return async (req: NextApiRequest, res: NextApiResponse<ApiResponse>) => {
-    try {
-      await handler(req, res);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({
-        status: 'error',
-        error: 'Internal server error',
-      });
-    }
-  };
-}
-
-export function withAuth(
-  handler: (req: NextApiRequest, res: NextApiResponse<ApiResponse>) => Promise<void>
-) {
-  return async (req: NextApiRequest, res: NextApiResponse<ApiResponse>) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    
-    if (!token) {
-      return res.status(401).json({
-        status: 'error',
-        error: 'Unauthorized',
-      });
-    }
-    
-    try {
-      // Verify token here
-      await handler(req, res);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({
-        status: 'error',
-        error: 'Internal server error',
-      });
-    }
-  };
-}
-"""
-        with open(api_dir / "_utils.ts", 'w') as f:
-            f.write(api_utils)
-        
-        # Create styles with Tailwind configuration
-        styles_dir = src_dir / "styles"
-        styles_dir.mkdir(exist_ok=True)
-        
-        globals_css = """@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-:root {
-  --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 214, 219, 220;
-  --background-end-rgb: 255, 255, 255;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --foreground-rgb: 255, 255, 255;
-    --background-start-rgb: 0, 0, 0;
-    --background-end-rgb: 0, 0, 0;
-  }
-}
-
-@layer base {
-  body {
-    @apply text-gray-900 dark:text-gray-100;
-    background: linear-gradient(
-      to bottom,
-      transparent,
-      rgb(var(--background-end-rgb))
-    )
-    rgb(var(--background-start-rgb));
-  }
-  
-  h1 {
-    @apply text-4xl font-bold mb-4;
-  }
-  
-  h2 {
-    @apply text-3xl font-semibold mb-3;
-  }
-  
-  h3 {
-    @apply text-2xl font-medium mb-2;
-  }
-}
-
-@layer components {
-  .btn {
-    @apply px-4 py-2 rounded-md font-medium transition-colors;
-  }
-  
-  .btn-primary {
-    @apply btn bg-blue-600 text-white hover:bg-blue-700;
-  }
-  
-  .btn-secondary {
-    @apply btn bg-gray-200 text-gray-800 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200;
-  }
-  
-  .input {
-    @apply px-3 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-800 dark:border-gray-700;
-  }
-}
-"""
-        with open(styles_dir / "globals.css", 'w') as f:
-            f.write(globals_css)
-
-        # Create Home.module.css
-        home_styles = """.main {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  align-items: center;
-  padding: 6rem;
-  min-height: 100vh;
-}
-
-.description {
-  display: inherit;
-  justify-content: inherit;
-  align-items: inherit;
-  font-size: 0.85rem;
-  max-width: var(--max-width);
-  width: 100%;
-  z-index: 2;
-  font-family: var(--font-mono);
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(25%, auto));
-  max-width: 100%;
-  width: var(--max-width);
-}
-
-.card {
-  padding: 1rem 1.2rem;
-  border-radius: var(--border-radius);
-  background: rgba(var(--card-rgb), 0);
-  border: 1px solid rgba(var(--card-border-rgb), 0);
-  transition: background 200ms, border 200ms;
-}
-
-.card span {
-  display: inline-block;
-  transition: transform 200ms;
-}
-
-.card h2 {
-  font-weight: 600;
-  margin-bottom: 0.7rem;
-}
-
-.card p {
-  margin: 0;
-  opacity: 0.6;
-  font-size: 0.9rem;
-  line-height: 1.5;
-  max-width: 30ch;
-}
-"""
-        with open(styles_dir / "Home.module.css", 'w') as f:
-            f.write(home_styles)
-
-        # Create contexts directory for state management
-        contexts_dir = src_dir / "contexts"
+    async def _create_theme_context(self, project_path: Path) -> None:
+        """Create theme context"""
+        contexts_dir = project_path / 'src' / 'contexts'
         contexts_dir.mkdir(exist_ok=True)
         
-        # Create ThemeContext
-        theme_context = """import { createContext, useContext, useState, ReactNode } from 'react';
-import { Theme } from '@/types';
+        theme_context_content = """import { createContext, useContext, useState } from 'react';
 
-interface ThemeContextType {
+type Theme = 'light' | 'dark';
+
+type ThemeContextType = {
   theme: Theme;
   toggleTheme: () => void;
-}
-
-const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
-
-const lightTheme: Theme = {
-  mode: 'light',
-  primary: '#3B82F6',
-  secondary: '#6B7280',
-  background: '#FFFFFF',
-  text: '#111827',
 };
 
-const darkTheme: Theme = {
-  mode: 'dark',
-  primary: '#60A5FA',
-  secondary: '#9CA3AF',
-  background: '#111827',
-  text: '#FFFFFF',
-};
+const ThemeContext = createContext<ThemeContextType>({} as ThemeContextType);
 
-export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(lightTheme);
+export function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState<Theme>('light');
 
   const toggleTheme = () => {
-    setTheme(theme.mode === 'light' ? darkTheme : lightTheme);
+    setTheme(prev => prev === 'light' ? 'dark' : 'light');
   };
 
   return (
@@ -810,368 +993,737 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   );
 }
 
-export function useTheme() {
-  const context = useContext(ThemeContext);
-  if (context === undefined) {
-    throw new Error('useTheme must be used within a ThemeProvider');
-  }
-  return context;
-}
+export const useTheme = () => useContext(ThemeContext);
 """
-        with open(contexts_dir / "ThemeContext.tsx", 'w') as f:
-            f.write(theme_context)
         
-        # Create services directory for API calls
-        services_dir = src_dir / "services"
-        services_dir.mkdir(exist_ok=True)
-        
-        # Create public directory for assets
-        public_dir = project_path / "public"
-        public_dir.mkdir(exist_ok=True)
-        
-        # Create tests directory
-        tests_dir = project_path / "tests"
-        tests_dir.mkdir(exist_ok=True)
-        
-        # Create Jest setup
-        jest_setup = """import '@testing-library/jest-dom';
-"""
-        with open(tests_dir / "jest.setup.ts", 'w') as f:
-            f.write(jest_setup) 
+        theme_context_path = contexts_dir / 'ThemeContext.tsx'
+        theme_context_path.write_text(theme_context_content) 
 
-    async def create_file(self, file_path: str, description: str) -> None:
-        """Create a new file with generated code based on description"""
-        try:
-            file_path = Path(file_path)
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Generate code based on file type and description
-            code = await self._generate_code_for_file(file_path, description)
-            
-            with open(file_path, 'w') as f:
-                f.write(code)
-                
-            logger.info(f"Created file: {file_path}")
-            
-        except Exception as e:
-            logger.error(f"Failed to create file {file_path}: {str(e)}")
-            raise ValueError(f"Failed to create file: {str(e)}")
+    async def _create_playlist_components(self, components_dir: Path) -> None:
+        """Create playlist-related components."""
+        playlist_list_content = """import React from 'react';
+import { usePlaylist } from '@/contexts/PlaylistContext';
 
-    async def modify_file(self, file_path: str, element: str, description: str) -> None:
-        """Modify an existing file based on description"""
-        try:
-            file_path = Path(file_path)
-            if not file_path.exists():
-                raise ValueError(f"File does not exist: {file_path}")
-            
-            # Read existing content
-            with open(file_path) as f:
-                content = f.read()
-            
-            # Generate and apply modifications
-            modified_content = await self._modify_code(content, element, description)
-            
-            # Write back to file
-            with open(file_path, 'w') as f:
-                f.write(modified_content)
-                
-            logger.info(f"Modified file: {file_path}")
-            
-        except Exception as e:
-            logger.error(f"Failed to modify file {file_path}: {str(e)}")
-            raise ValueError(f"Failed to modify file: {str(e)}")
+export function PlaylistList() {
+  const { playlists, removePlaylist } = usePlaylist();
 
-    async def generate_code_block(self, block_info: dict) -> str:
-        """Generate a code block based on description"""
-        try:
-            block_type = block_info["type"]
-            name = block_info["name"]
-            description = block_info["description"]
-            
-            # Generate code based on block type
-            if block_type == "function":
-                return await self._generate_function(name, description)
-            elif block_type == "class":
-                return await self._generate_class(name, description)
-            elif block_type == "interface":
-                return await self._generate_interface(name, description)
-            else:
-                raise ValueError(f"Unsupported block type: {block_type}")
-                
-        except Exception as e:
-            logger.error(f"Failed to generate code block: {str(e)}")
-            raise ValueError(f"Failed to generate code block: {str(e)}")
-
-    async def create_component(self, component_info: dict) -> None:
-        """Create a new component based on description"""
-        try:
-            name = component_info["name"]
-            description = component_info["description"]
-            
-            # Determine component type and path
-            component_path = self._get_component_path(name)
-            
-            # Generate component code
-            code = await self._generate_component_code(name, description)
-            
-            # Create component file
-            component_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(component_path, 'w') as f:
-                f.write(code)
-                
-            # Create associated test file
-            test_code = await self._generate_component_test(name)
-            test_path = Path(str(component_path).replace('/src/', '/tests/'))
-            test_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(test_path, 'w') as f:
-                f.write(test_code)
-                
-            logger.info(f"Created component: {component_path}")
-            
-        except Exception as e:
-            logger.error(f"Failed to create component: {str(e)}")
-            raise ValueError(f"Failed to create component: {str(e)}")
-
-    async def create_api_endpoint(self, endpoint_info: str) -> None:
-        """Create a new API endpoint based on description"""
-        try:
-            # Parse endpoint information
-            endpoint_path = self._get_api_path(endpoint_info)
-            
-            # Generate API code
-            code = await self._generate_api_code(endpoint_info)
-            
-            # Create API file
-            endpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(endpoint_path, 'w') as f:
-                f.write(code)
-                
-            logger.info(f"Created API endpoint: {endpoint_path}")
-            
-        except Exception as e:
-            logger.error(f"Failed to create API endpoint: {str(e)}")
-            raise ValueError(f"Failed to create API endpoint: {str(e)}")
-
-    async def setup_database(self, db_info: dict) -> None:
-        """Set up database configuration and models"""
-        try:
-            db_type = db_info["type"]
-            models = db_info.get("models", [])
-            
-            # Create database configuration
-            config_code = await self._generate_db_config(db_type)
-            config_path = Path("src/config/database.ts")
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(config_path, 'w') as f:
-                f.write(config_code)
-            
-            # Create models
-            for model in models:
-                model_code = await self._generate_model(model, db_type)
-                model_path = Path(f"src/models/{model}.ts")
-                model_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(model_path, 'w') as f:
-                    f.write(model_code)
-                
-            logger.info(f"Set up database with type: {db_type}")
-            
-        except Exception as e:
-            logger.error(f"Failed to set up database: {str(e)}")
-            raise ValueError(f"Failed to set up database: {str(e)}")
-
-    def _get_component_path(self, name: str) -> Path:
-        """Determine the appropriate path for a component"""
-        # Convert name to PascalCase for component
-        component_name = "".join(word.capitalize() for word in name.split("-"))
-        return Path(f"src/components/{component_name}/{component_name}.tsx")
-
-    def _get_api_path(self, endpoint: str) -> Path:
-        """Determine the appropriate path for an API endpoint"""
-        # Convert endpoint description to path
-        endpoint_path = endpoint.lower().replace(" ", "-")
-        return Path(f"src/pages/api/{endpoint_path}.ts")
-
-    async def _generate_code_for_file(self, file_path: Path, description: str) -> str:
-        """Generate code for a new file based on its type and description"""
-        file_type = file_path.suffix
-        
-        if file_type in ['.tsx', '.jsx']:
-            return await self._generate_react_code(file_path.stem, description)
-        elif file_type == '.ts':
-            return await self._generate_typescript_code(file_path.stem, description)
-        elif file_type == '.js':
-            return await self._generate_javascript_code(file_path.stem, description)
-        else:
-            raise ValueError(f"Unsupported file type: {file_type}")
-
-    async def _modify_code(self, content: str, element: str, description: str) -> str:
-        """Modify existing code based on description"""
-        # This would be where you implement the logic to modify existing code
-        # For now, we'll raise an error
-        raise NotImplementedError("Code modification not yet implemented")
-
-    async def _generate_function(self, name: str, description: str) -> str:
-        """Generate a function based on description"""
-        # This would be where you implement the logic to generate function code
-        # For now, we'll raise an error
-        raise NotImplementedError("Function generation not yet implemented")
-
-    async def _generate_class(self, name: str, description: str) -> str:
-        """Generate a class based on description"""
-        # This would be where you implement the logic to generate class code
-        # For now, we'll raise an error
-        raise NotImplementedError("Class generation not yet implemented")
-
-    async def _generate_interface(self, name: str, description: str) -> str:
-        """Generate an interface based on description"""
-        # This would be where you implement the logic to generate interface code
-        # For now, we'll raise an error
-        raise NotImplementedError("Interface generation not yet implemented")
-
-    async def _generate_component_code(self, name: str, description: str) -> str:
-        """Generate React component code based on description"""
-        # Convert name to PascalCase for component
-        component_name = "".join(word.capitalize() for word in name.split("-"))
-        
-        # Analyze description for features
-        has_state = any(word in description.lower() for word in ["state", "data", "value", "counter", "toggle"])
-        has_effects = any(word in description.lower() for word in ["fetch", "load", "update", "subscribe"])
-        has_router = any(word in description.lower() for word in ["route", "navigation", "link", "redirect"])
-        has_form = "form" in description.lower()
-        
-        # Generate imports
-        imports = ['import React from "react"']
-        if has_state:
-            imports.append('import { useState } from "react"')
-        if has_effects:
-            imports.append('import { useEffect } from "react"')
-        if has_router:
-            imports.append('import { useRouter } from "next/router"')
-            imports.append(f'import styles from "./{component_name}.module.css"')
-        
-        # Join imports with newlines before the f-string
-        imports_text = "\n".join(imports)
-        code = f"""// {component_name} Component
-{imports_text}
-
-interface {component_name}Props {{
-  title?: string;
-  className?: string;
-  children?: React.ReactNode;
-}}
-
-export function {component_name}({{ title, className, children }}: {component_name}Props) {{
-"""
-
-        # Add state if needed
-        if has_state:
-            code += """  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-
-"""
-
-        # Add effects if needed
-        if has_effects:
-            code += """  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        // Add fetch logic here
-        setLoading(false);
-      } catch (err) {
-        setError(err.message);
-        setLoading(false);
-      }
-    };
-    
-    fetchData();
-  }, []);
-
-"""
-
-        # Add form handlers if needed
-        if has_form:
-            code += """  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    // Add form submission logic here
-  };
-
-"""
-
-        # Generate JSX
-        code += """  return (
-    <div className={`${styles.container} ${className || ''}`}>
-"""
-
-        if "title" in description.lower():
-            code += "      <h1 className={styles.title}>{title}</h1>\n"
-
-        if has_state:
-            code += """      {loading && <div className={styles.loading}>Loading...</div>}
-      {error && <div className={styles.error}>{error}</div>}
-      {data && (
-        <div className={styles.content}>
-          {/* Add data rendering logic here */}
+  return (
+    <div className="space-y-4">
+      {playlists.map(playlist => (
+        <div key={playlist.id} className="bg-gray-800 p-4 rounded-lg">
+          <div className="flex justify-between items-center">
+            <h3 className="text-lg font-medium">{playlist.name}</h3>
+            <button
+              onClick={() => removePlaylist(playlist.id)}
+              className="text-red-500 hover:text-red-600"
+            >
+              Delete
+            </button>
+          </div>
+          <p className="text-sm text-gray-400 mt-1">
+            {playlist.songs.length} songs
+          </p>
         </div>
-      )}
-"""
-
-        if has_form:
-            code += """      <form onSubmit={handleSubmit} className={styles.form}>
-        <input
-          type="text"
-          className={styles.input}
-          // Add form fields here
-        />
-        <button type="submit" className={styles.button}>
-          Submit
-        </button>
-      </form>
-"""
-
-        code += """      {children}
+      ))}
     </div>
   );
-}
-"""
+}"""
 
-        return code
+        playlist_form_content = """import React, { useState } from 'react';
+import { usePlaylist } from '@/contexts/PlaylistContext';
+
+export function PlaylistForm() {
+  const [name, setName] = useState('');
+  const { addPlaylist } = usePlaylist();
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (name.trim()) {
+      addPlaylist({
+        id: Date.now().toString(),
+        name: name.trim(),
+        songs: []
+      });
+      setName('');
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div>
+        <label htmlFor="playlist-name" className="block text-sm font-medium">
+          Playlist Name
+        </label>
+        <input
+          type="text"
+          id="playlist-name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+          placeholder="Enter playlist name"
+        />
+      </div>
+      <button
+        type="submit"
+        className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+      >
+        Create Playlist
+      </button>
+    </form>
+  );
+}"""
+
+        await self._write_file(os.path.join(components_dir, "PlaylistList.tsx"), playlist_list_content)
+        await self._write_file(os.path.join(components_dir, "PlaylistForm.tsx"), playlist_form_content)
+        logger.info("Created playlist components") 
+
+    async def _create_visualizer_component(self, components_dir: Path) -> None:
+        """Create audio visualizer component."""
+        visualizer_content = """import React, { useEffect, useRef } from 'react';
+
+interface AudioVisualizerProps {
+  audioRef: React.RefObject<HTMLAudioElement>;
+  isPlaying: boolean;
+}
+
+export function AudioVisualizer({ audioRef, isPlaying }: AudioVisualizerProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animationRef = useRef<number>();
+  const analyserRef = useRef<AnalyserNode>();
+
+  useEffect(() => {
+    if (!audioRef.current || !canvasRef.current) return;
+
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const analyser = audioContext.createAnalyser();
+    analyserRef.current = analyser;
+
+    const source = audioContext.createMediaElementSource(audioRef.current);
+    source.connect(analyser);
+    analyser.connect(audioContext.destination);
+
+    analyser.fftSize = 256;
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d')!;
+
+    const draw = () => {
+      const WIDTH = canvas.width;
+      const HEIGHT = canvas.height;
+
+      analyser.getByteFrequencyData(dataArray);
+
+      ctx.fillStyle = 'rgb(0, 0, 0)';
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+      const barWidth = (WIDTH / bufferLength) * 2.5;
+      let barHeight;
+      let x = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        barHeight = dataArray[i] / 2;
+
+        const r = barHeight + (25 * (i / bufferLength));
+        const g = 250 * (i / bufferLength);
+        const b = 50;
+
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillRect(x, HEIGHT - barHeight, barWidth, barHeight);
+
+        x += barWidth + 1;
+      }
+
+      animationRef.current = requestAnimationFrame(draw);
+    };
+
+    if (isPlaying) {
+      draw();
+    }
+
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+      audioContext.close();
+    };
+  }, [audioRef, isPlaying]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={300}
+      height={100}
+      className="bg-black rounded-lg"
+    />
+  );
+}"""
+
+        await self._write_file(os.path.join(components_dir, "AudioVisualizer.tsx"), visualizer_content)
+        logger.info("Created audio visualizer component") 
+
+    async def _write_file(self, path: str, content: str) -> None:
+        """Write content to a file, creating directories if needed."""
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            
+            # Write the file
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            logger.error(f"Failed to write file {path}: {str(e)}")
+            raise 
+
+    def _generate_streaming_player(self) -> str:
+        """Generate streaming player JSX."""
+        return """
+        <div className="audio-player">
+          {error && <div className="error">{error}</div>}
+          {stream && (
+            <audio
+              controls
+              src={stream}
+              className="w-full"
+            />
+          )}
+        </div>
+        """
+
+    def _generate_upload_interface(self) -> str:
+        """Generate file upload interface JSX."""
+        return """
+        <div className="upload-interface">
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={handleFileChange}
+            className="hidden"
+            id="audio-upload"
+          />
+          <label
+            htmlFor="audio-upload"
+            className="btn btn-primary"
+          >
+            Select Audio File
+          </label>
+          {progress > 0 && (
+            <div className="progress-bar">
+              <div
+                className="progress"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          )}
+        </div>
+        """ 
 
     async def build_project(self, config: ProjectConfig, requirements: dict) -> None:
-        """Build a new project with the given configuration and requirements"""
+        """Build project based on analyzed requirements."""
         try:
-            # Create project directory path from project_location and name
             project_path = Path(config.project_location) / config.name
+            self.project_path = project_path  # Store for use in other methods
             
-            # Initialize project structure
+            # Analyze requirements from description
+            features = await self._analyze_requirements(config.description)
+            
+            # Create project structure
             await self.initialize_project(config, requirements, project_path)
             
-            # Initialize git repository
-            try:
-                subprocess.run(['git', 'init'], cwd=project_path, check=True)
-                logger.info("Initialized git repository")
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"Failed to initialize git repository: {str(e)}")
-            
+            # Create components based on analyzed features
+            components_dir = project_path / 'src' / 'components'
+            for feature, details in features.items():
+                if details['detected']:
+                    await self._create_component(
+                        name=feature,
+                        requirements=details['requirements'],
+                        component_dir=components_dir
+                    )
+
             # Install dependencies
             try:
-                subprocess.run(['npm', 'install'], cwd=project_path, check=True)
+                npm_path = r"C:\Program Files\nodejs\npm.cmd"
+                subprocess.run([npm_path, 'install'], cwd=project_path, check=True)
                 logger.info("Installed dependencies")
             except subprocess.CalledProcessError as e:
                 logger.error(f"Failed to install dependencies: {str(e)}")
                 raise ValueError("Failed to install dependencies")
-            
-            # Create initial commit
-            try:
-                subprocess.run(['git', 'add', '.'], cwd=project_path, check=True)
-                subprocess.run(['git', 'commit', '-m', 'Initial commit'], cwd=project_path, check=True)
-                logger.info("Created initial commit")
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"Failed to create initial commit: {str(e)}")
-            
+
+            # Enhance project with API integrations
+            enhancements = await self.api_manager.enhance_project_structure(
+                config.description,
+                features
+            )
+
+            # Update dependencies
+            if 'dependencies' in requirements:
+                requirements['dependencies'].update(enhancements['dependencies'])
+
+            # Create API integration files
+            await self._create_api_integrations(
+                project_path,
+                enhancements['apis']
+            )
+
+            # Apply code patterns
+            await self._apply_code_patterns(
+                project_path,
+                enhancements['code_patterns']
+            )
+
             logger.info(f"Successfully built project at {project_path}")
-            
+
         except Exception as e:
             logger.error(f"Failed to build project: {str(e)}")
             raise ValueError(f"Failed to build project: {str(e)}") 
+
+    async def _create_api_integrations(self, project_path: Path, apis: List[Dict]) -> None:
+        """Create API integration files for the project."""
+        try:
+            api_dir = project_path / 'src' / 'api'
+            api_dir.mkdir(exist_ok=True)
+
+            for api in apis:
+                # Create API client
+                client_content = self._generate_api_client(api)
+                await self._write_file(
+                    os.path.join(api_dir, f"{api['name'].lower()}.ts"),
+                    client_content
+                )
+
+                # Create API hooks
+                hook_content = self._generate_api_hook(api)
+                await self._write_file(
+                    os.path.join(project_path / 'src' / 'hooks', f"use{api['name']}.ts"),
+                    hook_content
+                )
+
+            logger.info(f"Created API integrations for {len(apis)} APIs")
+        except Exception as e:
+            logger.error(f"Failed to create API integrations: {str(e)}")
+            raise
+
+    def _generate_api_client(self, api: Dict) -> str:
+        """Generate API client code based on OpenAPI spec."""
+        endpoints = api['info'].get('endpoints', [])
+        
+        imports = [
+            'import axios from "axios"',
+            'import { API_CONFIG } from "@/config/api"'
+        ]
+        
+        methods = []
+        types = []
+        
+        for endpoint in endpoints:
+            method_name = endpoint['operationId']
+            response_type = endpoint.get('responseType', 'any')
+            request_type = endpoint.get('requestType')
+            
+            # Generate TypeScript types
+            if response_type != 'any':
+                types.append(f"type {response_type} = {endpoint['responseSchema']}")
+            if request_type:
+                types.append(f"type {request_type} = {endpoint['requestSchema']}")
+            
+            # Generate method
+            method = f"""
+async function {method_name}({
+    'params: ' + request_type if request_type else ''
+}): Promise<{response_type}> {{
+    const response = await axios.{endpoint['method']}(
+        `${{API_CONFIG.baseUrl}}{endpoint['path']}`,
+        {'{params}' if endpoint['method'] in ['post', 'put', 'patch'] else ''}
+    );
+    return response.data;
+}}"""
+            methods.append(method)
+        
+        return f"""// Generated API client for {api['name']}
+{chr(10).join(imports)}
+
+{chr(10).join(types)}
+
+{chr(10).join(methods)}
+
+export const {api['name']}Client = {{
+    {','.join(endpoint['operationId'] for endpoint in endpoints)}
+}};
+"""
+
+    def _generate_api_hook(self, api: Dict) -> str:
+        """Generate React hook for API integration."""
+        endpoints = api['info'].get('endpoints', [])
+        
+        imports = [
+            'import { useState } from "react"',
+            f'import {{ {api["name"]}Client }} from "@/api/{api["name"].lower()}"'
+        ]
+        
+        hook_content = []
+        for endpoint in endpoints:
+            hook_content.append(f"""
+const {endpoint['operationId']} = async ({
+    'params: ' + endpoint.get('requestType', 'any') if endpoint.get('requestType') else ''
+}) => {{
+    try {{
+        setLoading(true);
+        const result = await {api['name']}Client.{endpoint['operationId']}({
+            'params' if endpoint.get('requestType') else ''
+        });
+        setData(result);
+        return result;
+    }} catch (error) {{
+        setError(error);
+        throw error;
+    }} finally {{
+        setLoading(false);
+    }}
+}};""")
+        
+        return f"""// Generated hook for {api['name']} API
+{chr(10).join(imports)}
+
+export function use{api['name']}() {{
+    const [data, setData] = useState<any>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<Error | null>(null);
+    
+    {chr(10).join(hook_content)}
+    
+    return {{
+        data,
+        loading,
+        error,
+        {','.join(endpoint['operationId'] for endpoint in endpoints)}
+    }};
+}}
+"""
+
+    async def _apply_code_patterns(self, project_path: Path, patterns: List[Dict]) -> None:
+        """Apply discovered code patterns to the project."""
+        try:
+            for pattern in patterns:
+                # Determine the appropriate location for the pattern
+                target_path = self._determine_pattern_location(project_path, pattern)
+                if target_path:
+                    # Analyze and adapt the pattern
+                    adapted_content = self._adapt_code_pattern(pattern['content'])
+                    # Write the adapted pattern
+                    await self._write_file(target_path, adapted_content)
+                    logger.info(f"Applied code pattern to {target_path}")
+        except Exception as e:
+            logger.error(f"Failed to apply code patterns: {str(e)}")
+            raise
+
+    def _determine_pattern_location(self, project_path: Path, pattern: Dict) -> Optional[str]:
+        """Determine where to place a code pattern in the project."""
+        file_path = pattern['path']
+        if 'components' in file_path.lower():
+            return os.path.join(project_path, 'src', 'components', os.path.basename(file_path))
+        elif 'hooks' in file_path.lower():
+            return os.path.join(project_path, 'src', 'hooks', os.path.basename(file_path))
+        elif 'utils' in file_path.lower():
+            return os.path.join(project_path, 'src', 'utils', os.path.basename(file_path))
+        return None
+
+    def _adapt_code_pattern(self, content: str) -> str:
+        """Adapt a code pattern to match project structure and conventions."""
+        # Remove any project-specific imports
+        lines = content.split('\n')
+        adapted_lines = []
+        
+        for line in lines:
+            # Adjust imports to match project structure
+            if line.startswith('import'):
+                line = self._adjust_import_path(line)
+            # Remove project-specific comments
+            if not line.strip().startswith('//') or 'eslint' in line:
+                adapted_lines.append(line)
+        
+        return '\n'.join(adapted_lines)
+
+    def _adjust_import_path(self, import_line: str) -> str:
+        """Adjust import paths to match project structure."""
+        if '@/' in import_line:
+            return import_line
+        
+        # Convert relative imports to absolute
+        if import_line.startswith('import') and ('./' in import_line or '../' in import_line):
+            parts = import_line.split(' from ')
+            if len(parts) == 2:
+                path = parts[1].strip("'").strip('"')
+                if path.endswith('.ts') or path.endswith('.tsx'):
+                    path = path[:-3]
+                return f"{parts[0]} from '@/{path}'"
+        
+        return import_line 
+
+    async def _create_api_config(self, project_path: Path, apis: List[Dict]) -> None:
+        """Create API configuration file."""
+        config_dir = project_path / 'src' / 'config'
+        config_dir.mkdir(exist_ok=True)
+        
+        config_content = """// API Configuration
+export const API_CONFIG = {
+    baseUrl: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api',
+    endpoints: {
+"""
+        
+        for api in apis:
+            config_content += f"""        {api['name'].lower()}: {{
+                baseUrl: process.env.NEXT_PUBLIC_{api['name'].upper()}_API_URL,
+                apiKey: process.env.NEXT_PUBLIC_{api['name'].upper()}_API_KEY,
+            }},
+"""
+        
+        config_content += """    }
+};
+"""
+        
+        await self._write_file(
+            os.path.join(config_dir, "api.ts"),
+            config_content
+        )
+        logger.info("Created API configuration") 
+
+    def _generate_component_content(
+        self,
+        name: str,
+        imports: List[str],
+        hooks: List[str],
+        props: List[str],
+        state: List[str],
+        effects: List[str],
+        jsx: List[str]
+    ) -> str:
+        """Generate the content for a React component."""
+        # Format imports
+        import_statements = self._format_imports(imports)
+        
+        # Generate props interface if needed
+        props_interface = ""
+        if props:
+            props_interface = f"""
+interface {name}Props {{
+    {chr(10).join(props)}
+}}
+"""
+        
+        # Generate the component
+        return f"""
+{import_statements}
+
+{props_interface}
+export function {name}({f"props: {name}Props" if props else ""}) {{
+    {chr(10).join(hooks)}
+    
+    {chr(10).join(state)}
+    
+    {chr(10).join(effects)}
+    
+    return (
+        {chr(10).join(jsx) if jsx else "<div />"}
+    );
+}}
+""" 
+
+    async def _scrape_component_template(self, component_type: str) -> Optional[Dict[str, str]]:
+        """Scrape component template from 21st.dev."""
+        try:
+            base_url = "https://21st.dev"
+            component_map = {
+                'audio': 'ui-elements/audio-player',
+                'playlist': 'ui-elements/list',
+                'visualization': 'ui-elements/canvas',
+                'upload': 'ui-elements/file-upload',
+                'player': 'ui-elements/media-player',
+                'button': 'ui-elements/button',
+                'card': 'ui-elements/card',
+                'modal': 'ui-elements/dialog',
+                'form': 'ui-elements/form',
+                'input': 'ui-elements/input',
+                'slider': 'ui-elements/slider',
+                'spinner': 'ui-elements/spinner-loader',
+            }
+
+            if component_type not in component_map:
+                return None
+
+            async with aiohttp.ClientSession() as session:
+                url = f"{base_url}/{component_map[component_type]}"
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        return self._extract_component_code(html, component_type)
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to scrape component template: {str(e)}")
+            return None
+
+    def _extract_component_code(self, html: str, component_type: str) -> Dict[str, str]:
+        """Extract component code, styles and types from HTML."""
+        # Basic extraction - in real implementation would use proper HTML parsing
+        component = {
+            'tsx': '',
+            'css': '',
+            'types': '',
+            'dependencies': []
+        }
+
+        try:
+            # Extract TypeScript/TSX code
+            tsx_start = html.find('```tsx')
+            if tsx_start != -1:
+                tsx_end = html.find('```', tsx_start + 6)
+                if tsx_end != -1:
+                    component['tsx'] = html[tsx_start + 6:tsx_end].strip()
+
+            # Extract CSS/Tailwind classes
+            css_start = html.find('```css')
+            if css_start != -1:
+                css_end = html.find('```', css_start + 6)
+                if css_end != -1:
+                    component['css'] = html[css_start + 6:css_end].strip()
+
+            # Extract TypeScript types
+            types_start = html.find('```ts')
+            if types_start != -1:
+                types_end = html.find('```', types_start + 5)
+                if types_end != -1:
+                    component['types'] = html[types_start + 5:types_end].strip()
+
+            # Extract dependencies
+            deps_start = html.find('### Dependencies')
+            if deps_start != -1:
+                deps_section = html[deps_start:html.find('#', deps_start + 1)].lower()
+                component['dependencies'] = [
+                    dep.strip() 
+                    for dep in deps_section.split('\n') 
+                    if dep.strip().startswith('- ')
+                ]
+
+        except Exception as e:
+            logger.warning(f"Error extracting component code: {str(e)}")
+
+        return component
+
+    async def _enhance_component_with_template(self, name: str, requirements: List[str], base_content: str) -> str:
+        """Enhance component content with scraped template if available."""
+        enhanced_content = base_content
+
+        for req in requirements:
+            template = await self._scrape_component_template(req)
+            if template:
+                # Add any new imports
+                if 'tsx' in template:
+                    imports = self._extract_imports(template['tsx'])
+                    enhanced_content = self._merge_imports(enhanced_content, imports)
+
+                # Add any new types
+                if template.get('types'):
+                    enhanced_content = self._merge_types(enhanced_content, template['types'])
+
+                # Add any new styles
+                if template.get('css'):
+                    enhanced_content = self._merge_styles(enhanced_content, template['css'])
+
+                # Update dependencies if needed
+                if template.get('dependencies'):
+                    await self._update_project_dependencies(template['dependencies'])
+
+        return enhanced_content
+
+    def _extract_imports(self, code: str) -> List[str]:
+        """Extract import statements from code."""
+        imports = []
+        for line in code.split('\n'):
+            if line.strip().startswith('import '):
+                imports.append(line.strip())
+        return imports
+
+    def _merge_imports(self, original: str, new_imports: List[str]) -> str:
+        """Merge new imports into original code."""
+        original_imports = self._extract_imports(original)
+        all_imports = list(set(original_imports + new_imports))
+        return original.replace(
+            '\n'.join(original_imports),
+            self._format_imports(all_imports)
+        )
+
+    def _merge_types(self, original: str, new_types: str) -> str:
+        """Merge new types into original code."""
+        # Find the position after imports
+        import_end = original.rfind('import ')
+        if import_end != -1:
+            import_end = original.find('\n', import_end) + 1
+        else:
+            import_end = 0
+
+        return f"{original[:import_end]}\n{new_types}\n{original[import_end:]}"
+
+    def _merge_styles(self, original: str, new_styles: str) -> str:
+        """Merge new styles into original code."""
+        if 'className=' not in original:
+            return original
+
+        # Convert CSS to Tailwind classes if needed
+        tailwind_classes = self._convert_css_to_tailwind(new_styles)
+        
+        # Add classes to existing className props
+        def add_classes(match):
+            existing = match.group(1)
+            return f'className="{existing} {tailwind_classes}"'
+
+        return re.sub(r'className="([^"]*)"', add_classes, original)
+
+    def _convert_css_to_tailwind(self, css: str) -> str:
+        """Convert CSS to Tailwind classes."""
+        # This would be a more complex implementation
+        # For now, just return basic mappings
+        tailwind_map = {
+            'display: flex': 'flex',
+            'flex-direction: column': 'flex-col',
+            'align-items: center': 'items-center',
+            'justify-content: center': 'justify-center',
+            'padding': 'p-4',
+            'margin': 'm-4',
+            'width: 100%': 'w-full',
+            'height: 100%': 'h-full',
+        }
+
+        classes = []
+        for css_prop, tw_class in tailwind_map.items():
+            if css_prop in css:
+                classes.append(tw_class)
+
+        return ' '.join(classes)
+
+    async def _update_project_dependencies(self, dependencies: List[str]) -> None:
+        """Update project package.json with new dependencies."""
+        try:
+            package_json_path = self.project_path / 'package.json'
+            if not package_json_path.exists():
+                return
+
+            with open(package_json_path, 'r') as f:
+                package_json = json.load(f)
+
+            modified = False
+            for dep in dependencies:
+                name = dep.split('@')[0].strip('- ')
+                version = dep.split('@')[1] if '@' in dep else 'latest'
+                
+                if name not in package_json.get('dependencies', {}):
+                    if 'dependencies' not in package_json:
+                        package_json['dependencies'] = {}
+                    package_json['dependencies'][name] = version
+                    modified = True
+
+            if modified:
+                with open(package_json_path, 'w') as f:
+                    json.dump(package_json, f, indent=2)
+
+        except Exception as e:
+            logger.warning(f"Failed to update dependencies: {str(e)}") 

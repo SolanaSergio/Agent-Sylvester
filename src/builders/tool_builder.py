@@ -110,74 +110,145 @@ class ToolBuilder:
         current_content = main_script.read_text() if main_script.exists() else ""
         new_content = self._get_tool_template(config)
         
-        if current_content != new_content:
+        if new_content != current_content:
             main_script.write_text(new_content)
             
-        # Update helpers
+        # Update helper modules
         if config.get('helpers'):
             helpers_dir = tool_dir / "helpers"
             helpers_dir.mkdir(exist_ok=True)
             
-            # Remove old helpers
-            for helper_file in helpers_dir.glob("*.py"):
-                if helper_file.stem not in [h['name'] for h in config['helpers']]:
-                    helper_file.unlink()
-                    
+            # Get current helper files
+            current_helpers = {f.stem: f for f in helpers_dir.glob("*.py")}
+            
             # Update/create new helpers
             for helper in config['helpers']:
                 helper_file = helpers_dir / f"{helper['name']}.py"
-                helper_file.write_text(helper['content'])
+                if helper_file.exists():
+                    current_content = helper_file.read_text()
+                    if current_content != helper['content']:
+                        helper_file.write_text(helper['content'])
+                else:
+                    helper_file.write_text(helper['content'])
+                    
+                # Remove from current_helpers dict to track obsolete files
+                current_helpers.pop(helper['name'], None)
+                
+            # Remove obsolete helper files
+            for obsolete_file in current_helpers.values():
+                obsolete_file.unlink()
 
     def _get_tool_template(self, config: Dict) -> str:
-        """Get tool script template"""
-        return f"""#!/usr/bin/env python3
-import sys
-import argparse
-import json
-from pathlib import Path
-
-def main():
-    parser = argparse.ArgumentParser(description="{config.get('description', '')}")
-    
-    # Add arguments
-    {self._generate_argument_parser(config.get('arguments', []))}
-    
-    args = parser.parse_args()
-    
-    # Load configuration
-    config_file = Path(__file__).parent / "config.json"
-    if config_file.exists():
-        with open(config_file) as f:
-            config = json.load(f)
-    else:
-        config = {{}}
+        """Get the template for the main tool script"""
+        template = [
+            "#!/usr/bin/env python3",
+            "import argparse",
+            "import sys",
+            "import json",
+            "from pathlib import Path",
+            ""
+        ]
         
-    # Tool implementation
-    try:
-        {config.get('implementation', 'pass')}
-    except Exception as e:
-        print(f"Error: {{str(e)}}", file=sys.stderr)
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
-"""
+        # Add imports from helpers
+        if config.get('helpers'):
+            template.extend([
+                "from helpers import *",
+                ""
+            ])
+            
+        # Add main class
+        template.extend([
+            f"class {config['name'].title()}Tool:",
+            "    def __init__(self):",
+            "        self.config = self._load_config()",
+            "",
+            "    def _load_config(self):",
+            "        config_file = Path(__file__).parent / 'config.json'",
+            "        if config_file.exists():",
+            "            return json.loads(config_file.read_text())",
+            "        return {}"
+        ])
+        
+        # Add methods
+        for method in config.get('methods', []):
+            template.extend([
+                "",
+                f"    def {method['name']}(self, args):",
+                f"        \"\"\"{method.get('description', '')}\"\"\""
+            ])
+            template.extend([f"        {line}" for line in method.get('implementation', [])])
+            
+        # Add main execution
+        template.extend([
+            "",
+            "def main():",
+            "    parser = argparse.ArgumentParser(description='" + config.get('description', '') + "')"
+        ])
+        
+        # Add argument parsing
+        if config.get('arguments'):
+            template.append(self._generate_argument_parser(config['arguments']))
+            
+        template.extend([
+            "    args = parser.parse_args()",
+            f"    tool = {config['name'].title()}Tool()",
+            "    # Execute requested command",
+            "    if hasattr(args, 'func'):",
+            "        args.func(args)",
+            "    else:",
+            "        parser.print_help()",
+            "",
+            "if __name__ == '__main__':",
+            "    main()"
+        ])
+        
+        return "\n".join(template)
 
     def _generate_argument_parser(self, arguments: List[Dict]) -> str:
-        """Generate argument parser code"""
-        lines = []
-        for arg in arguments:
-            flags = [f"'-{arg['short']}'"] if 'short' in arg else []
-            flags.append(f"'--{arg['name']}'")
+        """Generate argument parser code for the tool"""
+        parser_code = []
+        
+        # Add subparsers if we have multiple commands
+        if len(arguments) > 1:
+            parser_code.extend([
+                "    subparsers = parser.add_subparsers(help='Available commands')"
+            ])
             
-            kwargs = [f"help='{arg.get('help', '')}'"]
-            if arg.get('required'):
-                kwargs.append("required=True")
-            if 'default' in arg:
-                kwargs.append(f"default='{arg['default']}'")
-            if arg.get('type'):
-                kwargs.append(f"type={arg['type']}")
+            # Add each command's subparser
+            for arg in arguments:
+                name = arg['name']
+                help_text = arg.get('help', '')
+                parser_code.extend([
+                    f"    {name}_parser = subparsers.add_parser('{name}', help='{help_text}')",
+                ])
                 
-            lines.append(f"parser.add_argument({', '.join(flags)}, {', '.join(kwargs)})")
+                # Add command-specific arguments
+                for param in arg.get('parameters', []):
+                    flags = [f"'-{param['short']}'"] if 'short' in param else []
+                    flags.append(f"'--{param['name']}'")
+                    
+                    parser_code.append(
+                        f"    {name}_parser.add_argument({', '.join(flags)}, "
+                        f"type={param.get('type', 'str')}, "
+                        f"help='{param.get('help', '')}')"
+                    )
+                    
+                # Set the function to call for this command
+                parser_code.append(f"    {name}_parser.set_defaults(func=tool.{name})")
+                
+        else:
+            # Single command tool - add arguments directly to main parser
+            for param in arguments[0].get('parameters', []):
+                flags = [f"'-{param['short']}'"] if 'short' in param else []
+                flags.append(f"'--{param['name']}'")
+                
+                parser_code.append(
+                    f"    parser.add_argument({', '.join(flags)}, "
+                    f"type={param.get('type', 'str')}, "
+                    f"help='{param.get('help', '')}')"
+                )
+                
+            # Set the function to call
+            parser_code.append(f"    parser.set_defaults(func=tool.{arguments[0]['name']})")
             
-        return "\n    ".join(lines) 
+        return "\n".join(parser_code) 

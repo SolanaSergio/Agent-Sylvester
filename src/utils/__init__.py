@@ -9,6 +9,7 @@ from .types import (
 from .project_config import ProjectConfig
 from .constants import *
 from .system_checker import SystemChecker
+from .api_manager import APIManager
 
 __all__ = [
     'AgentStatus',
@@ -18,5 +19,6 @@ __all__ = [
     'StylePattern',
     'LayoutPattern',
     'LayoutType',
-    'SystemChecker'
+    'SystemChecker',
+    'APIManager'
 ] 

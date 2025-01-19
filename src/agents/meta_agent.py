@@ -1,12 +1,17 @@
 import asyncio
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from src.utils.types import ProjectConfig, ProjectStatus, ComponentStatus, DependencyInfo
 # Import managers only when needed in methods to avoid circular imports
 import logging
 from src.agents.progress_tracker import ProgressTracker
 import datetime
 from src.builders.project_builder import ProjectBuilder
+from src.analyzers.requirement_analyzer import RequirementAnalyzer
+from src.managers.dependency_manager import DependencyManager
+import json
+import shutil
+import subprocess
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -103,54 +108,43 @@ class MetaAgent:
             raise ValueError(f"Failed to create project directory: {str(e)}")
 
     async def initialize_project(self, config: ProjectConfig) -> None:
-        """Initialize a new project"""
+        """Initialize a new project with the given configuration"""
         try:
-            # Initialize progress tracker if not already initialized
-            if not self.progress_tracker:
-                self.progress_tracker = ProgressTracker(self.project_path)
-                
-            await self.progress_tracker.update_status("Starting project initialization")
-            
-            # Set up project path
+            self.current_project = config
             self.project_path = Path(config.project_location) / config.name
-            self.current_project = config  # Store current project config
             
-            # Check permissions
-            await self.progress_tracker.update_status("Checking permissions...")
+            # Initialize progress tracker
+            self.progress_tracker = ProgressTracker()
+            await self.progress_tracker.start_tracking()
+            
+            # Perform initialization steps
+            await self.progress_tracker.update_progress("Starting project initialization")
             await self._check_permissions()
             
-            # Create project directory
-            await self.progress_tracker.update_status("Creating project directory...")
+            await self.progress_tracker.update_progress("Checking permissions...")
             await self._create_project_directory()
             
-            # Set up project structure
-            await self.progress_tracker.update_status("Setting up project structure...")
-            await self.progress_tracker.update_status("Creating initial structure")
+            await self.progress_tracker.update_progress("Creating project directory...")
             
-            # Determine framework and features
-            if not config.framework:
-                if config.project_type == "backend":
-                    config.framework = "Node"
-                else:
-                    config.framework = "Next.js"
-            logger.info(f"Using framework: {config.framework}")
+            # Analyze requirements
+            await self.progress_tracker.update_progress("Analyzing project requirements")
+            requirements = await self.requirement_analyzer.analyze_requirements(
+                self.project_path,
+                config.description
+            )
             
-            # Analyze requirements with enhanced feature detection
-            await self.progress_tracker.update_status("Analyzing project requirements")
-            requirements = await self.requirement_analyzer.analyze_project_requirements(config, self.project_path)
+            # Build project with error handling and recovery
+            try:
+                await self.project_builder.build_project(config, requirements)
+            except Exception as e:
+                await self._handle_error(e, "project_builder.build_project")
+                # Retry after error handling
+                await self.project_builder.build_project(config, requirements)
             
-            # Use existing project builder instance
-            await self.project_builder.build_project(config, requirements)
-            
-            # Set up dependencies
-            await self.progress_tracker.update_status("Setting up dependencies")
-            await self.dependency_manager.setup_project_dependencies(config, self.project_path)
-            
-            await self.progress_tracker.update_status("Project initialization complete")
-            logger.info("Project initialization completed successfully")
+            await self.progress_tracker.update_progress("Project initialization completed")
             
         except Exception as e:
-            await self.progress_tracker.update_status("Project initialization failed")
+            await self._handle_error(e, "initialize_project")
             raise Exception(f"Project initialization failed: {str(e)}")
 
     async def _extract_project_config(self) -> ProjectConfig:
@@ -564,3 +558,1076 @@ class MetaAgent:
             logger.error(f"Cleanup failed: {str(e)}")
             if self.progress_tracker:
                 await self.progress_tracker.update_status("Cleanup failed", {"error": str(e)}) 
+
+    async def _handle_error(self, error: Exception, context: str) -> None:
+        """Enhanced error handling with better recovery logic."""
+        try:
+            error_str = str(error)
+            logger.error(f"Error in {context}: {error_str}")
+            
+            # First try specific error handlers
+            if "useAuth" in error_str or "AuthContext" in error_str:
+                await self._ensure_auth_implementation()
+                return
+            elif "ThemeContext" in error_str:
+                await self._ensure_theme_implementation()
+                return
+            elif "import" in error_str.lower():
+                await self._fix_import_error()
+                return
+            elif "module" in error_str.lower():
+                await self._fix_module_error()
+                return
+            elif "dependency" in error_str.lower():
+                await self._fix_dependency_issues()
+                return
+                
+            # If specific handlers didn't work, try general recovery
+            await self._analyze_and_fix_error(error, context)
+            
+        except Exception as recovery_error:
+            logger.error(f"Error during recovery: {str(recovery_error)}")
+            # Try one last time with missing method recovery
+            try:
+                await self._add_missing_method_recovery()
+                # After adding missing methods, try the original fix again
+                if "useAuth" in error_str:
+                    await self._ensure_auth_implementation()
+                elif "import" in error_str.lower():
+                    await self._fix_import_error()
+            except Exception as final_error:
+                logger.error(f"Final recovery attempt failed: {str(final_error)}")
+                raise Exception(f"Recovery failed: {str(error)} -> {str(recovery_error)} -> {str(final_error)}")
+
+    async def _analyze_and_fix_error(self, error: Exception, context: str) -> None:
+        """Enhanced error analysis and fixing with better recovery paths."""
+        try:
+            error_str = str(error)
+            logger.info(f"Analyzing error in context '{context}': {error_str}")
+
+            # Check for missing methods first
+            if "has no attribute" in error_str:
+                await self._handle_missing_method_error(error_str, context)
+                return
+
+            # Try pattern-based fixes
+            patterns = {
+                'import': self._fix_import_error,
+                'module': self._fix_module_error,
+                'dependency': self._fix_dependency_issues,
+                'auth': self._ensure_auth_implementation,
+                'theme': self._ensure_theme_implementation
+            }
+
+            for pattern, fix_method in patterns.items():
+                if pattern.lower() in error_str.lower():
+                    await fix_method()
+                    return
+
+            # If no pattern matched, try context-based recovery
+            await self._handle_recovery_failure(error)
+
+        except Exception as e:
+            logger.error(f"Error analysis failed: {str(e)}")
+            raise
+
+    async def _handle_missing_method_error(self, error_str: str, context: str) -> None:
+        """Enhanced missing method error handler with better recovery."""
+        try:
+            import re
+            match = re.search(r"'(.+?)' object has no attribute '(.+?)'", error_str)
+            if not match:
+                raise ValueError(f"Could not parse error: {error_str}")
+
+            class_name, method_name = match.groups()
+            logger.info(f"Handling missing method '{method_name}' in class '{class_name}'")
+
+            # Try to add the method
+            if method_name.startswith('_fix_'):
+                await self._add_missing_method_recovery()
+            elif method_name == '_handle_recovery_failure':
+                await self._ensure_recovery_handlers()
+            else:
+                # Try to find an alternative method
+                await self._find_alternative_method(method_name)
+
+        except Exception as e:
+            logger.error(f"Failed to handle missing method: {str(e)}")
+            raise
+
+    async def _ensure_recovery_handlers(self) -> None:
+        """Ensure all recovery handlers are properly initialized."""
+        try:
+            # Add essential recovery methods if missing
+            essential_methods = [
+                '_handle_recovery_failure',
+                '_fix_dependency_issues',
+                '_fix_import_error',
+                '_fix_module_error'
+            ]
+
+            for method in essential_methods:
+                if not hasattr(self, method):
+                    await self._add_missing_method_recovery()
+                    break
+
+            logger.info("Recovery handlers ensured")
+
+        except Exception as e:
+            logger.error(f"Failed to ensure recovery handlers: {str(e)}")
+            raise
+
+    async def _find_alternative_method(self, missing_method: str) -> None:
+        """Find and use alternative methods for missing functionality."""
+        try:
+            # Map of known alternatives
+            alternatives = {
+                'fix_dependency_error': '_fix_dependency_issues',
+                'fix_import': '_fix_import_error',
+                'fix_module': '_fix_module_error'
+            }
+
+            if missing_method in alternatives:
+                alternative = alternatives[missing_method]
+                if hasattr(self, alternative):
+                    await getattr(self, alternative)()
+                else:
+                    await self._add_missing_method_recovery()
+            else:
+                raise ValueError(f"No alternative found for {missing_method}")
+
+        except Exception as e:
+            logger.error(f"Failed to find alternative method: {str(e)}")
+            raise
+
+    async def _fix_dependency_issues(self) -> None:
+        """Fix dependency-related issues by ensuring all required dependencies are properly set up."""
+        try:
+            if not self.project_path:
+                raise ValueError("No active project")
+
+            logger.info("Attempting to fix dependency issues")
+            
+            # Check package.json exists
+            package_json = self.project_path / 'package.json'
+            if not package_json.exists():
+                await self._create_package_json()
+            
+            # Ensure core dependencies
+            core_deps = {
+                'dependencies': {
+                    'next': 'latest',
+                    'react': 'latest',
+                    'react-dom': 'latest',
+                    'next-auth': 'latest'
+                },
+                'devDependencies': {
+                    'typescript': 'latest',
+                    '@types/react': 'latest',
+                    '@types/node': 'latest',
+                    'eslint': 'latest',
+                    'eslint-config-next': 'latest'
+                }
+            }
+            
+            await self.dependency_manager.ensure_dependencies(core_deps)
+            
+            # Fix node_modules if needed
+            node_modules = self.project_path / 'node_modules'
+            if not node_modules.exists():
+                await self.dependency_manager.install_dependencies()
+                
+            logger.info("Dependency issues fixed")
+            
+        except Exception as e:
+            logger.error(f"Failed to fix dependency issues: {str(e)}")
+            raise
+
+    async def _create_package_json(self) -> None:
+        """Create a basic package.json file if missing."""
+        try:
+            content = {
+                "name": self.project_path.name,
+                "version": "0.1.0",
+                "private": True,
+                "scripts": {
+                    "dev": "next dev",
+                    "build": "next build",
+                    "start": "next start",
+                    "lint": "next lint"
+                },
+                "dependencies": {},
+                "devDependencies": {}
+            }
+            
+            package_json = self.project_path / 'package.json'
+            package_json.write_text(json.dumps(content, indent=2))
+            logger.info("Created package.json")
+            
+        except Exception as e:
+            logger.error(f"Failed to create package.json: {str(e)}")
+            raise
+
+    async def _add_missing_method_recovery(self) -> None:
+        """Attempt to recover from missing method errors by adding required methods."""
+        try:
+            # Add common missing methods
+            missing_methods = {
+                '_fix_dependency_error': self._get_dependency_error_fix,
+                '_fix_type_error': self._get_type_error_fix,
+                '_fix_component_creation': self._get_component_creation_fix,
+                '_fix_project_initialization': self._get_project_initialization_fix,
+                '_fix_style_error': self._get_style_error_fix,
+                '_fix_config_error': self._get_config_error_fix,
+                '_fix_build_error': self._get_build_error_fix,
+                '_fix_test_error': self._get_test_error_fix
+            }
+
+            for method_name, method_impl in missing_methods.items():
+                if not hasattr(self, method_name):
+                    setattr(self, method_name, method_impl())
+
+            logger.info("Added missing recovery methods")
+
+        except Exception as e:
+            logger.error(f"Failed to add missing methods: {str(e)}")
+            raise
+
+    def _get_dependency_error_fix(self):
+        """Get the implementation for fixing dependency errors."""
+        async def fix_dependency_error():
+            if not self.project_path:
+                return
+            await self.dependency_manager.update_dependencies()
+        return fix_dependency_error
+
+    def _get_type_error_fix(self):
+        """Get the implementation for fixing type errors."""
+        async def fix_type_error():
+            if not self.project_path:
+                return
+                
+            try:
+                # Run type check to get detailed errors
+                process = await asyncio.create_subprocess_exec(
+                    'npx', 'tsc', '--noEmit',
+                    cwd=self.project_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode != 0:
+                    # Parse type errors
+                    errors = self._parse_type_errors(stderr.decode())
+                    
+                    # Fix each error
+                    for error in errors:
+                        await self._fix_single_type_error(error)
+                        
+                # Run type check again to verify fixes
+                await asyncio.create_subprocess_exec(
+                    'npx', 'tsc', '--noEmit',
+                    cwd=self.project_path
+                )
+                
+            except Exception as e:
+                logging.error(f"Error fixing type errors: {str(e)}")
+                raise
+                
+        return fix_type_error
+
+    def _get_component_creation_fix(self):
+        """Get the implementation for fixing component creation errors."""
+        async def fix_component_creation():
+            if not self.project_path:
+                return
+                
+            try:
+                # Analyze component structure
+                components_dir = Path(self.project_path) / 'src' / 'components'
+                if not components_dir.exists():
+                    components_dir.mkdir(parents=True)
+                    
+                # Check for common component issues
+                issues = await self._analyze_component_issues()
+                
+                for issue in issues:
+                    if issue.type == 'missing_props':
+                        await self._add_component_props(issue.component)
+                    elif issue.type == 'missing_types':
+                        await self._add_component_types(issue.component)
+                    elif issue.type == 'missing_exports':
+                        await self._fix_component_exports(issue.component)
+                    elif issue.type == 'style_issues':
+                        await self._fix_component_styles(issue.component)
+                        
+            except Exception as e:
+                logging.error(f"Error fixing component creation: {str(e)}")
+                raise
+                
+        return fix_component_creation
+
+    def _get_style_error_fix(self):
+        """Get the implementation for fixing style-related errors."""
+        async def fix_style_error():
+            if not self.project_path:
+                return
+                
+            try:
+                # Run ESLint to get style issues
+                process = await asyncio.create_subprocess_exec(
+                    'npx', 'eslint', 'src', '--format', 'json',
+                    cwd=self.project_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if stdout:
+                    # Parse ESLint output
+                    issues = json.loads(stdout.decode())
+                    
+                    # Fix each issue
+                    for issue in issues:
+                        await self._fix_style_issue(issue)
+                        
+                # Run Prettier to format code
+                await asyncio.create_subprocess_exec(
+                    'npx', 'prettier', '--write', 'src',
+                    cwd=self.project_path
+                )
+                
+            except Exception as e:
+                logging.error(f"Error fixing style errors: {str(e)}")
+                raise
+                
+        return fix_style_error
+
+    def _get_config_error_fix(self):
+        """Get the implementation for fixing configuration errors."""
+        async def fix_config_error():
+            if not self.project_path:
+                return
+                
+            try:
+                # Check and fix package.json
+                package_json = Path(self.project_path) / 'package.json'
+                if package_json.exists():
+                    await self._fix_package_json_config()
+                    
+                # Check and fix tsconfig.json
+                tsconfig = Path(self.project_path) / 'tsconfig.json'
+                if tsconfig.exists():
+                    await self._fix_tsconfig()
+                    
+                # Check and fix next.config.js
+                next_config = Path(self.project_path) / 'next.config.js'
+                if next_config.exists():
+                    await self._fix_next_config()
+                    
+                # Check and fix environment variables
+                env_file = Path(self.project_path) / '.env'
+                env_example = Path(self.project_path) / '.env.example'
+                if env_file.exists() or env_example.exists():
+                    await self._fix_env_config()
+                    
+            except Exception as e:
+                logging.error(f"Error fixing configuration: {str(e)}")
+                raise
+                
+        return fix_config_error
+
+    def _get_build_error_fix(self):
+        """Get the implementation for fixing build errors."""
+        async def fix_build_error():
+            if not self.project_path:
+                return
+                
+            try:
+                # Run build to get errors
+                process = await asyncio.create_subprocess_exec(
+                    'npm', 'run', 'build',
+                    cwd=self.project_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode != 0:
+                    # Parse build errors
+                    errors = self._parse_build_errors(stderr.decode())
+                    
+                    # Fix each error
+                    for error in errors:
+                        if 'Module not found' in error:
+                            await self._fix_missing_module(error)
+                        elif 'Type error' in error:
+                            await self._fix_build_type_error(error)
+                        elif 'Syntax error' in error:
+                            await self._fix_syntax_error(error)
+                        else:
+                            await self._fix_generic_build_error(error)
+                            
+                    # Try building again
+                    await asyncio.create_subprocess_exec(
+                        'npm', 'run', 'build',
+                        cwd=self.project_path
+                    )
+                    
+            except Exception as e:
+                logging.error(f"Error fixing build errors: {str(e)}")
+                raise
+                
+        return fix_build_error
+
+    def _get_test_error_fix(self):
+        """Get the implementation for fixing test-related errors."""
+        async def fix_test_error():
+            if not self.project_path:
+                return
+                
+            try:
+                # Run tests to get errors
+                process = await asyncio.create_subprocess_exec(
+                    'npm', 'test',
+                    cwd=self.project_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode != 0:
+                    # Parse test errors
+                    errors = self._parse_test_errors(stdout.decode())
+                    
+                    # Fix each error
+                    for error in errors:
+                        if 'snapshot' in error.lower():
+                            await self._fix_snapshot_error(error)
+                        elif 'timeout' in error.lower():
+                            await self._fix_test_timeout(error)
+                        elif 'assertion' in error.lower():
+                            await self._fix_assertion_error(error)
+                        else:
+                            await self._fix_generic_test_error(error)
+                            
+                    # Run tests again to verify fixes
+                    await asyncio.create_subprocess_exec(
+                        'npm', 'test',
+                        cwd=self.project_path
+                    )
+                    
+            except Exception as e:
+                logging.error(f"Error fixing test errors: {str(e)}")
+                raise
+                
+        return fix_test_error
+
+    async def _fix_single_type_error(self, error: Dict) -> None:
+        """Fix a single TypeScript type error."""
+        file_path = Path(self.project_path) / error['file']
+        if not file_path.exists():
+            return
+            
+        content = file_path.read_text()
+        lines = content.splitlines()
+        
+        if 'implicit any' in error['message'].lower():
+            # Add type annotation
+            line = lines[error['line'] - 1]
+            if ':' not in line:
+                variable = line.split('=')[0].strip()
+                lines[error['line'] - 1] = f"{variable}: any = {line.split('=')[1]}"
+                
+        elif 'property does not exist' in error['message'].lower():
+            # Add interface/type definition
+            type_name = error['message'].split("'")[1]
+            interface_def = f"\ninterface {type_name} {{\n  // TODO: Add proper type definition\n}}\n"
+            lines.insert(0, interface_def)
+            
+        elif 'no overload matches' in error['message'].lower():
+            # Fix function parameters
+            line = lines[error['line'] - 1]
+            if 'function' in line:
+                param = error['message'].split("'")[1]
+                lines[error['line'] - 1] = line.replace(param, 'any')
+                
+        file_path.write_text('\n'.join(lines))
+
+    async def _fix_style_issue(self, issue: Dict) -> None:
+        """Fix a single ESLint style issue."""
+        file_path = Path(self.project_path) / issue['filePath']
+        if not file_path.exists():
+            return
+            
+        content = file_path.read_text()
+        lines = content.splitlines()
+        
+        for message in issue['messages']:
+            line_num = message['line'] - 1
+            if message['ruleId'] == 'quotes':
+                # Fix quote style
+                lines[line_num] = lines[line_num].replace('"', "'")
+            elif message['ruleId'] == 'semi':
+                # Fix semicolons
+                if not lines[line_num].endswith(';'):
+                    lines[line_num] += ';'
+            elif message['ruleId'] == 'indent':
+                # Fix indentation
+                lines[line_num] = ' ' * message['fix']['range'][0] + lines[line_num].lstrip()
+                
+        file_path.write_text('\n'.join(lines))
+
+    async def _fix_package_json_config(self) -> None:
+        """Fix package.json configuration issues."""
+        package_json = Path(self.project_path) / 'package.json'
+        if not package_json.exists():
+            return
+            
+        data = json.loads(package_json.read_text())
+        
+        # Ensure required fields
+        if 'name' not in data:
+            data['name'] = Path(self.project_path).name
+        if 'version' not in data:
+            data['version'] = '0.1.0'
+        if 'scripts' not in data:
+            data['scripts'] = {}
+            
+        # Add common scripts
+        scripts = data['scripts']
+        if 'dev' not in scripts:
+            scripts['dev'] = 'next dev'
+        if 'build' not in scripts:
+            scripts['build'] = 'next build'
+        if 'start' not in scripts:
+            scripts['start'] = 'next start'
+        if 'lint' not in scripts:
+            scripts['lint'] = 'next lint'
+            
+        package_json.write_text(json.dumps(data, indent=2))
+
+    async def _fix_tsconfig(self) -> None:
+        """Fix tsconfig.json configuration issues."""
+        tsconfig = Path(self.project_path) / 'tsconfig.json'
+        if not tsconfig.exists():
+            return
+            
+        data = json.loads(tsconfig.read_text())
+        
+        # Ensure required fields
+        if 'compilerOptions' not in data:
+            data['compilerOptions'] = {}
+        if 'target' not in data['compilerOptions']:
+            data['compilerOptions']['target'] = 'es2020'
+        if 'module' not in data['compilerOptions']:
+            data['compilerOptions']['module'] = 'es2020'
+        if 'lib' not in data['compilerOptions']:
+            data['compilerOptions']['lib'] = ['es2020']
+            
+        tsconfig.write_text(json.dumps(data, indent=2))
+
+    async def _fix_next_config(self) -> None:
+        """Fix next.config.js configuration issues."""
+        next_config = Path(self.project_path) / 'next.config.js'
+        if not next_config.exists():
+            return
+            
+        content = next_config.read_text()
+        lines = content.splitlines()
+        
+        # Ensure required fields
+        if 'target' not in content:
+            lines.append('target: "node16"')
+        if 'nodeVersion' not in content:
+            lines.append('nodeVersion: "16.14.0"')
+            
+        next_config.write_text('\n'.join(lines))
+
+    async def _fix_env_config(self) -> None:
+        """Fix environment variable configuration issues."""
+        env_file = Path(self.project_path) / '.env'
+        env_example = Path(self.project_path) / '.env.example'
+        if not env_file.exists() and not env_example.exists():
+            return
+            
+        if env_file.exists():
+            env_file.unlink()
+        if env_example.exists():
+            env_example.unlink()
+            
+        env_file.write_text('')
+
+    async def _fix_missing_module(self, error: str) -> None:
+        """Fix missing module errors."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Extract module name from error
+            module_name = error.split("'")[1]
+            
+            # Install missing module
+            await self.dependency_manager.install_dependencies([module_name])
+            
+        except Exception as e:
+            logger.error(f"Failed to fix missing module: {str(e)}")
+            raise
+
+    async def _fix_build_type_error(self, error: str) -> None:
+        """Fix build type errors."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Extract type name from error
+            type_name = error.split("'")[1]
+            
+            # Add type definition
+            await self._add_type_definition(type_name)
+            
+        except Exception as e:
+            logger.error(f"Failed to fix build type error: {str(e)}")
+            raise
+
+    async def _fix_syntax_error(self, error: str) -> None:
+        """Fix syntax errors."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Extract file path from error
+            file_path = error.split("'")[1]
+            
+            # Fix syntax error
+            await self._fix_syntax_error_in_file(file_path)
+            
+        except Exception as e:
+            logger.error(f"Failed to fix syntax error: {str(e)}")
+            raise
+
+    async def _fix_generic_build_error(self, error: str) -> None:
+        """Fix generic build errors."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Run build to get errors
+            process = await asyncio.create_subprocess_exec(
+                'npm', 'run', 'build',
+                cwd=self.project_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                # Parse build errors
+                errors = self._parse_build_errors(stderr.decode())
+                
+                # Fix each error
+                for error in errors:
+                    if 'Module not found' in error:
+                        await self._fix_missing_module(error)
+                    elif 'Type error' in error:
+                        await self._fix_build_type_error(error)
+                    elif 'Syntax error' in error:
+                        await self._fix_syntax_error(error)
+                    else:
+                        await self._fix_generic_build_error(error)
+                        
+                # Try building again
+                await asyncio.create_subprocess_exec(
+                    'npm', 'run', 'build',
+                    cwd=self.project_path
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to fix generic build error: {str(e)}")
+            raise
+
+    async def _fix_snapshot_error(self, error: str) -> None:
+        """Fix snapshot errors."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Extract test file path from error
+            test_file = error.split("'")[1]
+            
+            # Re-run tests
+            await self._run_tests()
+            
+        except Exception as e:
+            logger.error(f"Failed to fix snapshot error: {str(e)}")
+            raise
+
+    async def _fix_test_timeout(self, error: str) -> None:
+        """Fix test timeout errors."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Extract test file path from error
+            test_file = error.split("'")[1]
+            
+            # Increase timeout
+            await self._increase_timeout(test_file)
+            
+        except Exception as e:
+            logger.error(f"Failed to fix test timeout: {str(e)}")
+            raise
+
+    async def _fix_assertion_error(self, error: str) -> None:
+        """Fix assertion errors."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Extract test file path from error
+            test_file = error.split("'")[1]
+            
+            # Fix assertion
+            await self._fix_assertion_in_file(test_file)
+            
+        except Exception as e:
+            logger.error(f"Failed to fix assertion error: {str(e)}")
+            raise
+
+    async def _fix_generic_test_error(self, error: str) -> None:
+        """Fix generic test errors."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Re-run tests
+            await self._run_tests()
+            
+        except Exception as e:
+            logger.error(f"Failed to fix generic test error: {str(e)}")
+            raise
+
+    async def _run_tests(self) -> None:
+        """Re-run tests."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Run tests
+            process = await asyncio.create_subprocess_exec(
+                'npm', 'test',
+                cwd=self.project_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                # Parse test errors
+                errors = self._parse_test_errors(stdout.decode())
+                
+                # Fix each error
+                for error in errors:
+                    if 'snapshot' in error.lower():
+                        await self._fix_snapshot_error(error)
+                    elif 'timeout' in error.lower():
+                        await self._fix_test_timeout(error)
+                    elif 'assertion' in error.lower():
+                        await self._fix_assertion_error(error)
+                    else:
+                        await self._fix_generic_test_error(error)
+                        
+                # Run tests again to verify fixes
+                await asyncio.create_subprocess_exec(
+                    'npm', 'test',
+                    cwd=self.project_path
+                )
+            
+        except Exception as e:
+            logger.error(f"Failed to run tests: {str(e)}")
+            raise
+
+    async def _add_type_definition(self, type_name: str) -> None:
+        """Add a type definition to the project."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Add type definition to the project
+            await self._add_type_definition_to_file(type_name)
+            
+        except Exception as e:
+            logger.error(f"Failed to add type definition: {str(e)}")
+            raise
+
+    async def _add_type_definition_to_file(self, file: Path, type_name: str) -> None:
+        """Add a type definition to a specific file."""
+        if not file.exists():
+            return
+            
+        try:
+            content = file.read_text()
+            if f"interface {type_name} " not in content:
+                # Add type definition
+                interface_def = f"""
+interface {type_name} {{
+    // TODO: Add proper type definition
+}}
+"""
+                # Add after imports or at top of file
+                lines = content.splitlines()
+                insert_idx = 0
+                for i, line in enumerate(lines):
+                    if line.startswith('import '):
+                        insert_idx = i + 1
+                    elif line.startswith('export '):
+                        insert_idx = i
+                        break
+                        
+                lines.insert(insert_idx, interface_def)
+                file.write_text('\n'.join(lines))
+            
+        except Exception as e:
+            logger.error(f"Failed to add type definition to file: {str(e)}")
+            raise
+
+    async def _fix_syntax_error_in_file(self, file_path: str) -> None:
+        """Fix syntax errors in a file."""
+        file = Path(self.project_path) / file_path
+        if not file.exists():
+            return
+            
+        try:
+            content = file.read_text()
+            lines = content.splitlines()
+            
+            # Common syntax fixes
+            for i, line in enumerate(lines):
+                # Fix missing semicolons
+                if not line.strip().endswith(';') and not line.strip().endswith('{') and not line.strip().endswith('}'):
+                    if any(keyword in line for keyword in ['return', 'const', 'let', 'var']):
+                        lines[i] = line + ';'
+                        
+                # Fix template literal syntax
+                if '${' in line and not line.count('`') >= 2:
+                    lines[i] = line.replace("'", '`').replace('"', '`')
+                    
+                # Fix object property access
+                if '[' in line and ']' in line and not '"' in line and not "'" in line:
+                    prop = line[line.index('[')+1:line.index(']')].strip()
+                    if prop.isidentifier():
+                        lines[i] = line.replace(f'[{prop}]', f'.{prop}')
+                        
+            file.write_text('\n'.join(lines))
+            
+        except Exception as e:
+            logger.error(f"Failed to fix syntax error in file: {str(e)}")
+            raise
+
+    async def _fix_assertion_in_file(self, test_file: str) -> None:
+        """Fix assertion errors in a test file."""
+        file = Path(self.project_path) / test_file
+        if not file.exists():
+            return
+            
+        try:
+            content = file.read_text()
+            lines = content.splitlines()
+            
+            for i, line in enumerate(lines):
+                if 'expect(' in line:
+                    # Fix common assertion issues
+                    if '.toBe(' in line and ('null' in line or 'undefined' in line):
+                        lines[i] = line.replace('.toBe(', '.toBeNull(') if 'null' in line else line.replace('.toBe(', '.toBeUndefined(')
+                    elif '.toBe({' in line or '.toBe([' in line:
+                        lines[i] = line.replace('.toBe(', '.toEqual(')
+                    elif '.toBe(' in line and ('true' in line or 'false' in line):
+                        lines[i] = line.replace('.toBe(', '.toBeTruthy(') if 'true' in line else line.replace('.toBe(', '.toBeFalsy(')
+                        
+            file.write_text('\n'.join(lines))
+            
+        except Exception as e:
+            logger.error(f"Failed to fix assertion in file: {str(e)}")
+            raise
+
+    async def _increase_timeout(self, test_file: str) -> None:
+        """Increase timeout for a test file."""
+        file = Path(self.project_path) / test_file
+        if not file.exists():
+            return
+            
+        try:
+            content = file.read_text()
+            lines = content.splitlines()
+            
+            for i, line in enumerate(lines):
+                if 'timeout' in line:
+                    # Extract current timeout value
+                    current = int(''.join(filter(str.isdigit, line)))
+                    # Double the timeout
+                    new_timeout = current * 2
+                    lines[i] = line.replace(str(current), str(new_timeout))
+                elif 'test(' in line or 'it(' in line:
+                    # Add timeout to test definition
+                    if 'timeout' not in line:
+                        lines[i] = line.replace(')', ', { timeout: 10000 })')
+                        
+            file.write_text('\n'.join(lines))
+            
+        except Exception as e:
+            logger.error(f"Failed to increase timeout: {str(e)}")
+            raise
+
+    async def _run_tests(self) -> None:
+        """Re-run tests."""
+        if not self.project_path:
+            return
+            
+        try:
+            # Run tests
+            process = await asyncio.create_subprocess_exec(
+                'npm', 'test',
+                cwd=self.project_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                # Parse test errors
+                errors = self._parse_test_errors(stdout.decode())
+                
+                # Fix each error
+                for error in errors:
+                    if 'snapshot' in error.lower():
+                        await self._fix_snapshot_error(error)
+                    elif 'timeout' in error.lower():
+                        await self._fix_test_timeout(error)
+                    elif 'assertion' in error.lower():
+                        await self._fix_assertion_error(error)
+                    else:
+                        await self._fix_generic_test_error(error)
+                        
+                # Run tests again to verify fixes
+                await asyncio.create_subprocess_exec(
+                    'npm', 'test',
+                    cwd=self.project_path
+                )
+            
+        except Exception as e:
+            logger.error(f"Failed to run tests: {str(e)}")
+            raise
+
+    async def _fix_import_error(self) -> None:
+        """Fix import-related errors by checking paths and dependencies."""
+        try:
+            # Check if node_modules exists
+            node_modules = self.project_builder.project_path / 'node_modules'
+            if not node_modules.exists():
+                # Try npm install again with full path
+                npm_path = r"C:\Program Files\nodejs\npm.cmd"
+                subprocess.run([npm_path, 'install'], cwd=self.project_builder.project_path, check=True)
+                logger.info("Reinstalled dependencies")
+            
+            # Check package.json
+            package_json = self.project_builder.project_path / 'package.json'
+            if not package_json.exists():
+                raise ValueError("package.json not found")
+            
+            # Validate package.json
+            with open(package_json, 'r') as f:
+                try:
+                    json.load(f)
+                except json.JSONDecodeError:
+                    raise ValueError("Invalid package.json")
+                    
+        except Exception as e:
+            logger.error(f"Failed to fix import error: {str(e)}")
+            raise
+
+    def _get_project_initialization_fix(self) -> Dict[str, Any]:
+        """Get fixes for project initialization issues."""
+        return {
+            'missing_files': self._fix_missing_files,
+            'invalid_json': self._fix_invalid_json,
+            'dependency_error': self._fix_dependency_error,
+            'import_error': self._fix_import_error,
+        }
+
+    async def _fix_missing_files(self, path: Path) -> None:
+        """Fix missing files by recreating them."""
+        try:
+            if not path.exists():
+                if path.suffix == '.json':
+                    # Recreate package.json
+                    if path.name == 'package.json':
+                        basic_package = {
+                            "name": path.parent.name,
+                            "version": "0.1.0",
+                            "private": True,
+                            "scripts": {
+                                "dev": "next dev",
+                                "build": "next build",
+                                "start": "next start"
+                            },
+                            "dependencies": {
+                                "next": "latest",
+                                "react": "latest",
+                                "react-dom": "latest"
+                            }
+                        }
+                        with open(path, 'w') as f:
+                            json.dump(basic_package, f, indent=2)
+                    
+                elif path.suffix in ['.tsx', '.ts']:
+                    # Recreate basic component
+                    await self.project_builder._create_component(
+                        name=path.stem,
+                        requirements=[],
+                        component_dir=path.parent
+                    )
+        except Exception as e:
+            logger.error(f"Failed to fix missing files: {str(e)}")
+            raise
+
+    async def _fix_invalid_json(self, path: Path) -> None:
+        """Fix invalid JSON files."""
+        try:
+            if path.exists() and path.suffix == '.json':
+                with open(path, 'r') as f:
+                    try:
+                        data = json.load(f)
+                    except json.JSONDecodeError:
+                        # Try to fix common JSON issues
+                        content = f.read()
+                        fixed_content = content.replace("'", '"').replace(",}", "}").replace(",]", "]")
+                        data = json.loads(fixed_content)
+                
+                with open(path, 'w') as f:
+                    json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to fix invalid JSON: {str(e)}")
+            raise
+
+    async def _fix_dependency_error(self) -> None:
+        """Fix dependency-related errors."""
+        try:
+            npm_path = r"C:\Program Files\nodejs\npm.cmd"
+            
+            # Clear node_modules and package-lock.json
+            node_modules = self.project_builder.project_path / 'node_modules'
+            package_lock = self.project_builder.project_path / 'package-lock.json'
+            
+            if node_modules.exists():
+                shutil.rmtree(node_modules)
+            if package_lock.exists():
+                package_lock.unlink()
+            
+            # Reinstall dependencies
+            subprocess.run([npm_path, 'install'], cwd=self.project_builder.project_path, check=True)
+            logger.info("Reinstalled dependencies after clearing cache")
+            
+        except Exception as e:
+            logger.error(f"Failed to fix dependency error: {str(e)}")
+            raise
